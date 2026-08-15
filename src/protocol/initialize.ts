@@ -16,7 +16,7 @@ import { PROTOCOL_VERSION, type InitializeRequest, type InitializeResponse } fro
  * `tests/session.spec.ts` 的一条用例守着——codeg 注册自定义 agent 时按
  * `deepseek-acp@<版本>` 对账，两处一旦漂移，表现是编辑器里连不上而不是报错。
  */
-export const AGENT_INFO = { name: 'deepseek-acp', version: '0.1.0' } as const
+export const AGENT_INFO = { name: 'deepseek-acp', version: '0.1.1' } as const
 
 /**
  * 客户端是否支持 Zed 的终端 `_meta` 约定。

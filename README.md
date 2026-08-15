@@ -104,8 +104,8 @@ API Key 填在客户端的环境变量里（下面两份配置都有位置）。
 |---|---|
 | 注册表 ID | `deepseek-acp` |
 | 显示名称 | `DeepSeek Harness` |
-| 版本 | `0.1.0` |
-| 分发信息（JSON） | `{"npx": {"package": "deepseek-acp@0.1.0", "cmd": "deepseek-acp"}}` |
+| 版本 | `0.1.1` |
+| 分发信息（JSON） | `{"npx": {"package": "deepseek-acp@0.1.1", "cmd": "deepseek-acp"}}` |
 | 环境变量 | `DEEPSEEK_API_KEY=sk-...` |
 | 版本查询命令 | 留空 |
 | MCP 支持 | 开着即可 |
