@@ -72,10 +72,48 @@ DeepSeek Harness 自带一个 ACP server（`@deepseek-ai/dsh-acp`），但它的
 
 ## 注册到编辑器
 
-可执行文件是 `deepseek-acp`，通过 stdio 说 ACP，**不接受任何参数**。
+可执行文件是 `deepseek-acp`，通过 stdio 说 ACP。**起服务不需要任何参数**——编辑器直接
+拉起即可；`--setup` / `--version` / `--help` 三个开关都是「跑完就退」，不进服务模式，
+其余参数一律照常起服务（编辑器可能出于自己的理由多传点什么，为此拒绝启动会把一个
+能跑的集成变成一句「连接失败」）。
 
-API Key 填在客户端的环境变量里（下面两份配置都有位置）。**别指望 `.zshrc` 里的
-`export`**——编辑器是 GUI 应用，不继承登录 shell 的环境，它派生的子进程同样拿不到。
+API Key 有两条路，二选一：
+
+- **`deepseek-acp --setup`** —— 交互式粘一次，存进 `$DSH_HOME/.credentials.yaml`
+  （`0600`）。见下面「登录」一节。
+- **客户端的环境变量** —— 下面两份配置都有位置。
+
+**别指望 `.zshrc` 里的 `export`**——编辑器是 GUI 应用，不继承登录 shell 的环境，
+它派生的子进程同样拿不到。这也正是 `--setup` 存在的理由：凭据落在文件里，与启动
+方式无关。
+
+### 登录
+
+`initialize` 里可能 advertise 一条 ACP 的 **Terminal Auth**：
+
+```json
+{ "id": "terminal", "type": "terminal", "args": ["--setup"] }
+```
+
+**只发给声明认得它的客户端**——`clientCapabilities.auth.terminal === true`，或
+`_meta["terminal-auth"] === true`（先于能力位存在的约定）。两者都没有时 `authMethods`
+是空数组，与这个功能存在之前一模一样：终端登录是 opt-in 的方法类型，塞给没准备好的
+客户端只会添乱。顺带一提，顶层的 `clientCapabilities.terminal` **不算**——那一位说的
+是「实现了 `terminal/*` 那组方法」（终端卡片），是另一件事。
+
+支持这条的客户端会用**同一个二进制**加上 `--setup` 另起一个交互式终端进程，等它
+退出——**退出码 0 即成功**——再重连。手动跑也是同一条：
+
+```sh
+deepseek-acp --setup      # 粘 Key，回车。终端下不回显
+```
+
+写入的引用名是 `DEEPSEEK_API_KEY`，落点 `$DSH_HOME/.credentials.yaml`。这一层**赢过**
+环境变量之外的两个 `.env` 层，所以之前在 `.env` 里放过的旧 Key 不会把它压住；而进程
+启动时**显式传入**的环境变量仍然优先级最高（那是「这一次运行」的操作意图）。
+
+声明这条**不代表会拦住建会话**：本项目从不返回 `auth_required`，缺 Key 的失败照旧
+发生在第一个回合（`MISSING_CREDENTIAL`）。它只是给客户端一个登录入口。
 
 ### Zed
 

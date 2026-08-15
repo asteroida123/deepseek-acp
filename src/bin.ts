@@ -6,6 +6,7 @@
 
 import { boot } from './launcher/boot.js'
 import { parseCli } from './launcher/cli.js'
+import { runSetup } from './launcher/setup.js'
 
 const action = parseCli(process.argv.slice(2))
 if (action.kind === 'print') {
@@ -14,6 +15,18 @@ if (action.kind === 'print') {
   // `deepseek-acp --version` 管道接走。
   process.stdout.write(`${action.text}\n`)
   process.exit(0)
+}
+
+if (action.kind === 'setup') {
+  // **退出码就是协议**：ACP 的 Terminal Auth 没有带内成功信号，客户端只看这个数
+  // 决定「登录成功了吗」。所以异常也要落成 1，而不是让它变成一个未捕获的拒绝
+  // ——那样的退出码是 1 没错，但堆栈会盖住 `runSetup` 已经写好的那句人话。
+  process.exit(
+    await runSetup(process.env).catch((error: unknown) => {
+      process.stderr.write(`deepseek-acp: setup failed: ${String(error)}\n`)
+      return 1
+    }),
+  )
 }
 
 // 客户端断开即退出。不靠「句柄耗尽自然退出」：组合里任何一个 fs watcher 或

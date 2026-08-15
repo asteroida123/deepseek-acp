@@ -6,7 +6,12 @@
  * @module
  */
 
-import { PROTOCOL_VERSION, type InitializeRequest, type InitializeResponse } from '@agentclientprotocol/sdk'
+import {
+  PROTOCOL_VERSION,
+  type AuthMethod,
+  type InitializeRequest,
+  type InitializeResponse,
+} from '@agentclientprotocol/sdk'
 
 /**
  * 服务端身份，固定字面量而非配置项。
@@ -17,6 +22,32 @@ import { PROTOCOL_VERSION, type InitializeRequest, type InitializeResponse } fro
  * `deepseek-acp@<版本>` 对账，两处一旦漂移，表现是编辑器里连不上而不是报错。
  */
 export const AGENT_INFO = { name: 'deepseek-acp', version: '0.1.1' } as const
+
+/**
+ * 唯一的鉴权方式：**Terminal Auth**（`deepseek-acp --setup`）。
+ *
+ * 为什么是这一档。ACP 规范定义了三种：`agent`（agent 自己起本地 HTTP server 跑
+ * OAuth 回调）、`terminal`（另起一个交互式进程登录）、`env_var`（客户端收集变量后
+ * 重启 agent）。本项目的凭据是一个 API Key：
+ *
+ * - `agent` 走不了——DeepSeek 给第三方的是 API Key，没有 OAuth。
+ * - `env_var` 最贴近现状，但它在 v2 里已被移除（旧描述符一律按 `agent` 解码），
+ *   而 **ACP registry 明确只收 `agent` 与 `terminal` 两档**。
+ *
+ * 于是剩下 `terminal`。语义上也不亏：Key 落进 `$DSH_HOME/.credentials.yaml` 之后与
+ * 启动方式无关，正好治「GUI 编辑器不继承登录 shell 环境」那个老问题。
+ *
+ * **`args` 必须与 {@link ../launcher/cli.ts} 认的开关一字不差**：客户端是拿同一个
+ * 二进制加上这里给的参数另起进程的，写错了表现是「登录界面一闪而过然后仍未登录」。
+ * `tests/session.spec.ts` 钉着这条。
+ */
+const TERMINAL_AUTH = {
+  id: 'terminal',
+  name: '在终端里登录',
+  description: '在终端里粘贴 DeepSeek API Key，存进 $DSH_HOME/.credentials.yaml',
+  type: 'terminal',
+  args: ['--setup'],
+} as const satisfies AuthMethod
 
 /**
  * 客户端是否支持 Zed 的终端 `_meta` 约定。
@@ -62,6 +93,38 @@ export function clientSupportsFsRead(params: InitializeRequest): boolean {
 }
 
 /**
+ * 客户端是否**认得** Terminal Auth —— 决定 {@link handleInitialize} 要不要
+ * advertise {@link TERMINAL_AUTH}。
+ *
+ * 这一位是**opt-in**，不是可选的礼貌。SDK 对 `ClientCapabilities.auth` 的说明写着
+ * 「Determines which authentication method types the agent **may** include in its
+ * `InitializeResponse`」，`auth.terminal` 那条更直白：「When `true`, the agent may
+ * include `terminal` entries」。没声明就塞过去，等于给客户端一个它没准备好的联合
+ * 变体——轻则被忽略，重则整个 `initialize` 应答解析失败。
+ *
+ * **两个信号都认**，因为现实里两种都在用：
+ *
+ * - `auth.terminal === true` —— 正式能力位（1.3.0 里仍标 UNSTABLE）。
+ * - `_meta['terminal-auth'] === true` —— 先于能力位存在的约定。**ACP registry 的
+ *   准入校验器发的正是这个**（`client.py` 的 `initialize` 只带 `terminal: true`、
+ *   `fs`、以及 `_meta` 里的 `terminal_output` / `terminal-auth`），只认正式能力位
+ *   的话 CI 会拿到空数组，直接判「No authMethods in response」。
+ *
+ * **不能读顶层的 `clientCapabilities.terminal`**：那一位说的是「客户端实现了
+ * `terminal/*` 那组方法」（终端卡片），与「认不认得终端登录」是两件事。registry
+ * 的校验器两个都发，正好会把这个混淆掩盖过去。
+ *
+ * 两处都**严格比 `=== true`**：`_meta` 的值类型是 `unknown`，真值判断会把字符串
+ * `"false"` 当成支持。
+ * @param params - initialize 请求
+ * @returns 可以 advertise 终端登录则 true
+ */
+export function clientSupportsTerminalAuth(params: InitializeRequest): boolean {
+  const caps = params.clientCapabilities
+  return caps?.auth?.terminal === true || caps?._meta?.['terminal-auth'] === true
+}
+
+/**
  * 把客户端声明的能力位摘成一行，供握手时记进 stderr。
  *
  * 存在的理由很实际：**「这个编辑器到底支持什么」是排查一切降级行为的起点**。
@@ -83,6 +146,11 @@ export function describeClient(params: InitializeRequest): string {
     `elicitation.form=${shown(caps?.elicitation?.form)}`,
     `terminal=${shown(caps?.terminal)}`,
     `_meta.terminal_output=${shown(caps?._meta?.['terminal_output'])}`,
+    // 登录入口没出现在编辑器里时，第一个要问的就是这两位。**分开回显**：正式
+    // 能力位与 `_meta` 约定是两条独立的来路，合成一个布尔就分不清是「老客户端」
+    // 还是「新客户端但没开」。
+    `auth.terminal=${shown(caps?.auth?.terminal)}`,
+    `_meta.terminal-auth=${shown(caps?._meta?.['terminal-auth'])}`,
   ].join('  ')
 }
 
@@ -96,10 +164,16 @@ export function describeClient(params: InitializeRequest): string {
  *
  * `close` 是例外，无条件声明：它释放的是**进程内**资源（agent、MCP 子进程、
  * 订阅），与会话能不能从日志恢复无关。
+ *
+ * `authMethods` 同理**跟着客户端走**（见 {@link clientSupportsTerminalAuth}）：终端
+ * 登录是一条 opt-in 的方法类型，没声明的客户端拿到它只会困惑。
  * @param options.persistent - 组合是否挂了持久化后端
+ * @param options.terminalAuth - 客户端是否认得终端登录
  * @returns 本 bridge 的 initialize 应答
  */
-export function handleInitialize(options: { persistent: boolean } = { persistent: false }): InitializeResponse {
+export function handleInitialize(
+  options: { persistent: boolean; terminalAuth?: boolean } = { persistent: false },
+): InitializeResponse {
   return {
     // 单版本 agent：规范里「支持则同版本，否则取最新支持版本」两条分支
     // 都归结到这一个版本。
@@ -127,6 +201,14 @@ export function handleInitialize(options: { persistent: boolean } = { persistent
       },
       ...(options.persistent ? { loadSession: true } : {}),
     },
-    authMethods: [],
+    // 声明了它**不等于**会拦住建会话：本 bridge 从不返回 `auth_required`，缺 Key
+    // 的失败仍旧发生在第一个回合（`MISSING_CREDENTIAL`）。这条只是把「还有一条
+    // 登录路子」告诉认得它的客户端，让它能给出一个入口。
+    //
+    // 不认得的客户端拿到空数组——与本改动之前的行为一字不差，因此不会有回归。
+    // `args` 复制一份：`TERMINAL_AUTH` 是 `as const`（readonly），而应答类型要的是
+    // 可变数组，且这个对象每次握手都要新造一个，免得共享引用被下游改到。
+    authMethods:
+      options.terminalAuth === true ? [{ ...TERMINAL_AUTH, args: [...TERMINAL_AUTH.args] }] : [],
   }
 }

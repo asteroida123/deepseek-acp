@@ -7,7 +7,8 @@ import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
-import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
+import { PROTOCOL_VERSION, type ClientCapabilities } from '@agentclientprotocol/sdk'
+import { parseCli } from '../src/launcher/cli.js'
 import { AGENT_INFO } from '../src/protocol/initialize.js'
 import { createHarness, type TestHarness } from './harness.js'
 
@@ -54,7 +55,57 @@ describe('initialize（US-01）', () => {
       audio: false,
       embeddedContext: true,
     })
-    // 未 advertise 认证方法
+  })
+
+  it('没声明 auth 能力的客户端拿到空 authMethods —— 与本功能之前的行为一致', async () => {
+    const h = await boot()
+    const res = await h.acp.request('initialize', {
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: {},
+    })
+    // 终端登录是 **opt-in** 的方法类型（SDK：「the agent **may** include `terminal`
+    // entries」当且仅当客户端声明）。塞给没准备好的客户端，轻则被忽略，重则整个
+    // 应答解析失败——那是一次静默的互操作回归，本地怎么测都测不出来。
+    expect(res.authMethods).toEqual([])
+  })
+
+  // 表项显式标注类型：`it.each` 会把字面量放宽，`request('initialize', …)` 的重载
+  // 就推不出应答类型，`res` 变成 unknown（用例照跑，typecheck 挂）。
+  it.each<[string, ClientCapabilities]>([
+    ['正式能力位 auth.terminal', { auth: { terminal: true } }],
+    // **ACP registry 的准入校验器发的正是这一个**（`client.py` 的 initialize 只带
+    // `terminal`、`fs` 和 `_meta` 里的两条），只认正式能力位的话 CI 会拿到空数组，
+    // 直接判「No authMethods in response」，PR 挂掉。
+    ['_meta 约定 terminal-auth', { _meta: { 'terminal-auth': true } }],
+  ])('%s 的客户端拿到那条 Terminal Auth，且 args 与 CLI 认的开关一致', async (_label, caps) => {
+    const h = await boot()
+    const res = await h.acp.request('initialize', {
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: caps,
+    })
+
+    // 这三个字段是 registry 的准入判据（要求至少一条 `type` 为 `agent` 或
+    // `terminal` 的方法），漂了就是 PR 挂掉，而本地一切照常——所以钉在这里。
+    expect(res.authMethods).toHaveLength(1)
+    const method = res.authMethods?.[0]
+    expect(method).toMatchObject({ id: 'terminal', type: 'terminal', args: ['--setup'] })
+
+    // `args` 与 CLI 之间是**跨文件的一致性**：客户端拿同一个二进制加这串参数另起
+    // 进程，对不上的表现是「终端一闪而过，然后仍未登录」。这里从 `parseCli` 那头
+    // 反向验一次，两边一起改才不会挂。
+    const args = (method as { args?: string[] }).args ?? []
+    expect(parseCli(args).kind).toBe('setup')
+  })
+
+  it('顶层 clientCapabilities.terminal 不是登录能力位 —— 不能拿它当 opt-in', async () => {
+    const h = await boot()
+    const res = await h.acp.request('initialize', {
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: { terminal: true },
+    })
+    // 那一位说的是「实现了 `terminal/*` 那组方法」（终端卡片），与「认不认得终端
+    // 登录」是两件事。registry 的校验器两个都发，正好会把这处混淆掩盖过去——所以
+    // 单独钉一条。
     expect(res.authMethods).toEqual([])
   })
 

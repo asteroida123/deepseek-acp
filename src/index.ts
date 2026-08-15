@@ -35,6 +35,7 @@ import {
   clientSupportsElicitation,
   clientSupportsFsRead,
   clientSupportsTerminal,
+  clientSupportsTerminalAuth,
   describeClient,
   handleInitialize,
 } from './protocol/initialize.js'
@@ -264,10 +265,23 @@ export function apply(ctx: Context, config: AcpBridgeConfig & ApplyOptions = {})
       // 记一行客户端能力位：一切降级行为的排查都从这里开始。走 stderr（AC-G1），
       // 且只在挂了 exporter 的组合里可见——测试装配不挂，因此不吵。
       logger?.info?.(`client ${describeClient(params)}`)
-      return handleInitialize({ persistent: port.catalog !== undefined })
+      return handleInitialize({
+        persistent: port.catalog !== undefined,
+        // 终端登录是 opt-in 的方法类型：只发给声明认得它的客户端，其余照旧拿空
+        // 数组。**必须读 `params`**——这是本 handler 里唯一一处「应答内容取决于
+        // 请求」的地方，漏掉的表现不是报错，是老客户端收到一个没准备好的变体。
+        terminalAuth: clientSupportsTerminalAuth(params),
+      })
     })
     .onRequest('authenticate', () => {
-      // 未 advertise 任何 authMethod，故无需认证。
+      // 仍是 no-op，但理由变了：现在 advertise 的那条是 **Terminal Auth**，而按
+      // 规范它**不经过这个 RPC**——客户端是拿同一个二进制加 `--setup` 另起一个
+      // 交互式进程，看退出码判成败，登录发生在这条连接之外。
+      //
+      // 那为什么不干脆报错？因为客户端**可以**把任意 methodId 送进来（老客户端、
+      // 或者把 terminal 方法误当成 agent 方法的实现），而这里除了「确认一声」没有
+      // 别的事要做：真正的凭据检查发生在第一个回合，缺 Key 就是 `MISSING_CREDENTIAL`。
+      // 为一个无害的调用返回错误，只会把「能跑」变成「连不上」。
     })
     .onRequest('session/new', ({ params }) => handleNewSession(bridge, params))
     .onRequest('session/load', ({ params }) => handleLoadSession(bridge, params))

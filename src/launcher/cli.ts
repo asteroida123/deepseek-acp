@@ -12,8 +12,8 @@
 import { AGENT_INFO } from '../protocol/initialize.js'
 import { DEFAULT_MODEL, DEFAULT_PROVIDER } from './boot.js'
 
-/** 解析结果：要么打印一段文本就退出，要么照常起服务。 */
-export type CliAction = { kind: 'print'; text: string } | { kind: 'serve' }
+/** 解析结果：打印一段文本就退出、跑一遍终端登录，或者照常起服务。 */
+export type CliAction = { kind: 'print'; text: string } | { kind: 'setup' } | { kind: 'serve' }
 
 /** `--help` 的正文。列出的环境变量就是 {@link readEnv} 与 {@link sessionsRoot} 真正读的那几个。 */
 function helpText(): string {
@@ -25,11 +25,17 @@ function helpText(): string {
     '',
     '用法：',
     '  deepseek-acp              以 ACP 服务运行（等编辑器在 stdin 上说话）',
+    '  deepseek-acp --setup      交互式登录：把 API Key 存进凭据文件后退出',
     '  deepseek-acp --version    打印版本后退出',
     '  deepseek-acp --help       打印本帮助后退出',
     '',
+    '登录：',
+    '  --setup 就是 ACP 的 Terminal Auth——编辑器会用这个参数另起一个终端进程，',
+    '  等它退出（退出码 0 即成功）再重连。Key 落在 $DSH_HOME/.credentials.yaml，',
+    '  与启动方式无关，比环境变量可靠：GUI 编辑器不继承登录 shell 的环境。',
+    '',
     '环境变量：',
-    `  DEEPSEEK_API_KEY              模型凭据；也可由 dsh 的凭据服务提供`,
+    `  DEEPSEEK_API_KEY              模型凭据；也可由 --setup 或 dsh 的凭据服务提供`,
     `  DEEPSEEK_ACP_PROVIDER         provider 路由（默认 ${DEFAULT_PROVIDER}）`,
     `  DEEPSEEK_ACP_MODEL            模型（默认 ${DEFAULT_MODEL}）`,
     '  DEEPSEEK_ACP_SESSIONS_ROOT    会话日志目录（默认 $DSH_HOME/sessions）',
@@ -53,6 +59,12 @@ export function parseCli(argv: readonly string[]): CliAction {
   }
   if (argv.includes('--help') || argv.includes('-h')) {
     return { kind: 'print', text: helpText() }
+  }
+  // 排在兜底之前、`--version` / `--help` 之后：那两个是「只想看一眼」的意图，
+  // 与谁一起传都该优先。**没有短开关**——`-s` 撞上的可能性太大，而这个参数是
+  // 编辑器按 `authMethods` 里的 `args` 原样传的，不需要好敲。
+  if (argv.includes('--setup')) {
+    return { kind: 'setup' }
   }
   return { kind: 'serve' }
 }
