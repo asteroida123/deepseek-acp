@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "lib",
+    "declaration": true,
+    "declarationDir": "lib/types",
+    // sourceMap / declarationMap 都指向 `src/`，所以 `package.json` 的 `files`
+    // **必须**带上 `src` —— 否则发出去的 42 份 .js.map 全是断的，从编辑器里拿到的
+    // 栈只会指到编译产物。
+    "sourceMap": true,
+    "declarationMap": true
+  },
+  "include": ["src/**/*.ts"]
+}

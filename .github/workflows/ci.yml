@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    # 沙箱用例（tests/sandbox.spec.ts、tests/composition.spec.ts）依赖**平台沙箱
+    # 后端**：macOS 走 Seatbelt，Linux 走 Landlock 或 bwrap。后端不可用时它们失败
+    # 是对的信号——内置组合在那种平台上本来就起不来，不该用 skip 掩过去。
+    # 因此 fail-fast: false：一条腿因平台原因红了，其余腿的结论仍要看得见。
+    name: ${{ matrix.os }} · node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [22, 24]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: 安装 Linux 沙箱后端
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm run build
+
+      # 用例不需要 API Key：只伪造 LLM 适配器一层，回合生命周期、工具执行、
+      # bash 子进程、沙箱与会话落盘都走真实路径。
+      - run: npm test
+
+      # stdout 纯净性（AC-G1）由 tests/stdout-guard.spec.ts 在子进程级守着，
+      # 已经包含在上面这步里。这里再单独验一次打包结果能不能真的跑起来——
+      # `prepack` 会重新构建，等价于一次完整的发布演练。
+      - name: 打包演练
+        run: |
+          npm pack
+          node lib/bin.js --version

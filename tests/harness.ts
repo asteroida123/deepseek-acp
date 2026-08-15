@@ -1,0 +1,371 @@
+/**
+ * 测试夹具：引导最小 dsh 组合并挂上 bridge，用一对内存流承载真实的
+ * ndJSON JSON-RPC 帧——因此测试覆盖到实际的编解码路径，而非绕过它。
+ *
+ * 不需要真实模型或 API Key：assistant 事件由测试直接向会话日志追加。
+ * @module
+ */
+
+import { Context } from '@deepseek-ai/cordis'
+import {
+  PROTOCOL_VERSION,
+  client as createClientApp,
+  ndJsonStream,
+  type ClientContext,
+  type Stream,
+} from '@agentclientprotocol/sdk'
+import AgentRegistry from '@deepseek-ai/dsh-agent'
+import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import LocalBash from '@deepseek-ai/dsh-bash-local'
+import SandboxBash from '@deepseek-ai/dsh-bash-sandbox'
+import CommandRuntime from '@deepseek-ai/dsh-commands'
+import PlanMode from '@deepseek-ai/dsh-plan-mode'
+import SessionProjections from '@deepseek-ai/dsh-session-projection'
+import ApprovalService from '@deepseek-ai/dsh-user-approval'
+import UserQuestions from '@deepseek-ai/dsh-user-questions'
+import * as AskUserTool from '@deepseek-ai/dsh-tool-ask-user'
+import LlmService from '@deepseek-ai/dsh-llm'
+import LocalSandbox from '@deepseek-ai/dsh-sandbox-local'
+import SandboxPolicy from '@deepseek-ai/dsh-sandbox-policy'
+import SessionService from '@deepseek-ai/dsh-session'
+import type {} from '@deepseek-ai/dsh-session-persistence'
+import JsonlPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import SessionTitle from '@deepseek-ai/dsh-session-title'
+import * as ShellEnv from '@deepseek-ai/dsh-shell-env'
+import SpillStore from '@deepseek-ai/dsh-spill'
+import LocalSubprocess from '@deepseek-ai/dsh-subprocess-local'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import * as BashTool from '@deepseek-ai/dsh-tool-bash'
+import ToolRegistry from '@deepseek-ai/dsh-tools'
+import { LocalFileSystem } from '@deepseek-ai/dsh-fs-local'
+import type {
+  ElicitationSchema,
+  CreateElicitationRequest,
+  CreateElicitationResponse,
+  ReadTextFileRequest,
+  ReadTextFileResponse,
+  RequestPermissionRequest,
+  RequestPermissionResponse,
+} from '@agentclientprotocol/sdk'
+import * as bridge from '../src/index.js'
+import { FAKE_MODEL, FAKE_PROVIDER, FakeLlmAdapter } from './fake-llm.js'
+
+/** 客户端侧收到的更新，按到达顺序。 */
+export interface CapturedUpdate {
+  sessionId: string
+  kind: string
+  text?: string
+}
+
+/** 客户端侧对 `session/request_permission` 的应答策略，可逐用例改写。 */
+export type PermissionResponder = (
+  request: RequestPermissionRequest,
+) => RequestPermissionResponse | Promise<RequestPermissionResponse>
+
+/** 客户端侧对 `elicitation/create` 的应答策略，可逐用例改写。 */
+export type ElicitationResponder = (
+  request: CreateElicitationRequest,
+) => CreateElicitationResponse | Promise<CreateElicitationResponse>
+
+/**
+ * 客户端侧对 `fs/read_text_file` 的应答策略，可逐用例改写（US-25）。
+ *
+ * 抛异常就是「这份缓冲区我给不出」——真实客户端的常态（文件没打开、超出它的
+ * 读上限、路径在它的策略之外），agent 侧据此回落磁盘。
+ */
+export type FsReadResponder = (
+  request: ReadTextFileRequest,
+) => ReadTextFileResponse | Promise<ReadTextFileResponse>
+
+export interface TestHarness {
+  ctx: Context
+  /** 驱动 agent 侧方法的客户端 context */
+  acp: ClientContext
+  updates: CapturedUpdate[]
+  /** 可编排的假模型 */
+  llm: FakeLlmAdapter
+  /** 客户端收到的授权请求，按到达顺序 */
+  permissionRequests: RequestPermissionRequest[]
+  /** 客户端收到的表单征询，按到达顺序 */
+  elicitations: CreateElicitationRequest[]
+  /** 客户端收到的文本读委托，按到达顺序（US-25） */
+  fsReads: ReadTextFileRequest[]
+  /** 改写客户端如何应答表单征询 */
+  setElicitationResponder: (responder: ElicitationResponder) => void
+  /** 改写客户端如何应答文本读委托 */
+  setFsReadResponder: (responder: FsReadResponder) => void
+  /** 订阅**原始** update 负载（`updates` 只保留摘要字段） */
+  onUpdate: (sink: (update: unknown) => void) => void
+  /** 改写客户端如何应答授权请求 */
+  setPermissionResponder: (responder: PermissionResponder) => void
+  /** 卸载 bridge 插件——即「仅 ACP 的 HMR 释放」路径 */
+  disposeBridge: () => void
+  /** 某会话 id 是否仍有存活 agent（孤儿检测） */
+  hasAgent: (sessionId: string) => boolean
+  /**
+   * 等到某会话真的落盘。
+   *
+   * 写入是批量合并的（默认 200ms 窗口）：回合结束、乃至 agent 从注册表里消失，
+   * 都**不**等于日志已经在磁盘上。直接去读会读到空目录。
+   */
+  waitPersisted: (sessionId: string, timeoutMs?: number) => Promise<void>
+}
+
+/** 等待条件成立。 */
+export async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 5_000,
+  label = 'condition',
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`)
+    await new Promise((r) => setTimeout(r, 10))
+  }
+}
+
+/**
+ * 表单的默认作答：每个字段取第一个候选，自由文本给一段占位。
+ *
+ * 这个函数只认自己发出去的那套 schema 形状（`oneOf` / `items.anyOf` / 纯
+ * string），不做通用 JSON Schema 求解。
+ */
+function defaultFormAnswer(request: CreateElicitationRequest): Record<string, string | string[]> {
+  const schema = 'requestedSchema' in request ? (request.requestedSchema as ElicitationSchema) : undefined
+  const content: Record<string, string | string[]> = {}
+  for (const [key, property] of Object.entries(schema?.properties ?? {})) {
+    const p = property as {
+      type?: string
+      oneOf?: { const: string }[]
+      items?: { anyOf?: { const: string }[]; enum?: string[] }
+    }
+    if (p.type === 'array') {
+      const first = p.items?.anyOf?.[0]?.const ?? p.items?.enum?.[0]
+      content[key] = first === undefined ? [] : [first]
+    } else {
+      content[key] = p.oneOf?.[0]?.const ?? '默认回答'
+    }
+  }
+  return content
+}
+
+/** 一对互联的 web 流，模拟 stdio 两端。 */
+function pipePair(): { a: Stream; b: Stream } {
+  let ctrlA!: ReadableStreamDefaultController<Uint8Array>
+  let ctrlB!: ReadableStreamDefaultController<Uint8Array>
+  const aToB = new ReadableStream<Uint8Array>({ start: (c) => { ctrlA = c } })
+  const bToA = new ReadableStream<Uint8Array>({ start: (c) => { ctrlB = c } })
+  const aOut = new WritableStream<Uint8Array>({ write: (chunk) => { ctrlA.enqueue(chunk) } })
+  const bOut = new WritableStream<Uint8Array>({ write: (chunk) => { ctrlB.enqueue(chunk) } })
+  return { a: ndJsonStream(aOut, bToA), b: ndJsonStream(bOut, aToB) }
+}
+
+/**
+ * 引导组合、挂载 bridge、连接内存客户端。
+ * @param options.config - 传给 bridge 的配置
+ * @param options.shell - 挂上真实 `bash` 工具：`local` 无沙箱，`sandbox` 走
+ *   部署真正用的那个 executor（要求平台有可用沙箱后端）
+ * @param options.sessionsRoot - 挂 JSONL 持久化并落盘到此；缺省不挂持久化，
+ *   于是 `session/load` / `session/list` 既不被 advertise 也不可用
+ * @param options.commands - 挂命令注册表（不含任何命令，除非同时挂 plan-mode）
+ * @param options.planMode - 挂 `dsh-plan-mode`：会话模式、`/plan` 命令与
+ *   `exit_plan_mode` 工具都随它进来
+ * @param options.questions - 挂 `dsh-user-questions` seam 与 `ask_user_question`
+ *   工具；bridge 会把提问接到 ACP 的表单征询上
+ * @param options.elicitation - 客户端是否 advertise `elicitation.form`；默认
+ *   跟随 `questions`，显式给 false 可测「客户端不支持」的降级
+ * @param options.title - 挂 `dsh-session-title`（不注册 provider，用内置的
+ *   确定性回退）
+ * @param options.fs - 挂 `dsh-fs-local` 后端；文件工具由 port 装在会话作用域，
+ *   所以这里只需要底座。与 `shell: 'local'` 同理：**不**挂沙箱版，让文件用例
+ *   不背平台依赖，部署真正用的那个由 `composition.spec` 断
+ * @param options.fsRead - 客户端是否 advertise `fs.readTextFile`（US-25）；
+ *   为真时握手会声明它，并注册一个可改写的 `fs/read_text_file` 应答器
+ */
+export async function createHarness(
+  options: {
+    config?: bridge.AcpBridgeConfig
+    shell?: 'local' | 'sandbox'
+    sessionsRoot?: string
+    commands?: boolean
+    planMode?: boolean
+    questions?: boolean
+    elicitation?: boolean
+    title?: boolean
+    fs?: boolean
+    fsRead?: boolean
+  } = {},
+): Promise<TestHarness> {
+  const ctx = new Context()
+  for (const plugin of [SystemPrompt, SessionService, LlmService, ToolRegistry, AgentRegistry, AgentLoop, ApprovalService]) {
+    await ctx.plugin(plugin, {})
+  }
+  if (options.sessionsRoot !== undefined) {
+    // `compression: 'none'` —— 用例出问题时日志能直接 cat 出来看。
+    await ctx.plugin(JsonlPersistence, { root: options.sessionsRoot, compression: 'none' })
+  }
+  // 命令面与模式面分别可选：默认两个都不挂，于是「没挂时的降级行为」才是
+  // 大多数用例跑的那条路径，不必专门去构造。
+  if (options.title === true) {
+    // 与部署一致：不注册 provider，用内置的确定性回退（取第一条用户消息）。
+    await ctx.plugin(SessionTitle, { fallbackMaxWords: 8, fallbackMaxBytes: 60, maxTitleBytes: 120 })
+  }
+  // 文件系统底座。文件工具**不**在这里挂：它随会话装（`mountSessionFs`），
+  // 这样会话级的读改道才可能生效。
+  if (options.fs === true) await ctx.plugin(LocalFileSystem, {})
+  if (options.commands === true || options.planMode === true) await ctx.plugin(CommandRuntime)
+  // plan-mode 的 `exit_plan_mode` 要经 `ctx.userQuestions` 评审，因此挂 plan-mode
+  // 就一并挂上这个 seam —— 否则那条链在测试里根本走不通。
+  if (options.questions === true || options.planMode === true) {
+    await ctx.plugin(UserQuestions)
+    await ctx.plugin(AskUserTool)
+  }
+  if (options.planMode === true) {
+    // plan-mode 会往 `sessionProjections` 注册一个投影单元（没挂就跳过），
+    // 挂上它让这条链与部署组合一致。
+    await ctx.plugin(SessionProjections)
+    await ctx.plugin(PlanMode, { section: 'TEST PLAN SECTION' })
+  }
+  // 默认用 `local`：终端卡片那条链跟哪个 executor 无关，而沙箱后端要做平台
+  // 探测、探测不到就 fail-closed——让全部用例都背上平台依赖换不来覆盖。只有
+  // 明确要测拒绝/提权的用例才要 `sandbox`。
+  if (options.shell !== undefined) {
+    await ctx.plugin(SpillStore, [])
+    // 只挂 `-local`：它继承 `dsh-subprocess` 并注册同一个服务，两个都挂会以
+    // 「服务已注册」失败；只挂 seam 则要到第一次执行才炸 spawn 不是函数。
+    await ctx.plugin(LocalSubprocess)
+    await ctx.plugin(ShellEnv, {})
+    if (options.shell === 'sandbox') {
+      await ctx.plugin(LocalSandbox, {})
+      // `read-only`：任何写都被拒，用来制造确定的拒绝与提权窗口。
+      await ctx.plugin(SandboxPolicy, { mode: 'read-only' })
+      await ctx.plugin(SandboxBash, {})
+    } else {
+      await ctx.plugin(LocalBash, {})
+    }
+    await ctx.plugin(BashTool, { enableRunInBackground: false })
+  }
+  await waitFor(
+    () =>
+      ctx.agents !== undefined
+      && ctx.tools !== undefined
+      && ctx.sessions !== undefined
+      && ctx.approval !== undefined
+      && (options.shell === undefined || ctx.tools.get('bash') !== undefined)
+      && (options.commands !== true || ctx.get('commands') !== undefined)
+      && (options.planMode !== true || ctx.get('planMode') !== undefined),
+    5_000,
+    'dsh services',
+  )
+
+  // 只伪造模型这一层；回合生命周期走真实 agent loop。
+  const llm = new FakeLlmAdapter()
+  ctx.llm.registerAdapter([FAKE_PROVIDER], llm)
+
+  const { a: agentSide, b: clientSide } = pipePair()
+  // `stream` 属于 ApplyOptions（测试传输覆盖），不在 Config schema 里。
+  await ctx.plugin(bridge, {
+    provider: FAKE_PROVIDER,
+    model: FAKE_MODEL,
+    ...options.config,
+    stream: agentSide,
+  } as never)
+
+  const updates: CapturedUpdate[] = []
+  const permissionRequests: RequestPermissionRequest[] = []
+  const elicitations: CreateElicitationRequest[] = []
+  // 默认取第一个选项（无选项则给一段自由文本）：用例若忘了设策略，得到的是
+  // 一个「用户答了」的确定结果，而不是挂住。
+  let elicitationResponder: ElicitationResponder = (request) => ({
+    action: 'accept',
+    content: defaultFormAnswer(request),
+  })
+  // 默认拒绝：测试若忘了设策略，得到的是 fail-closed 而非静默放行。
+  let responder: PermissionResponder = () => ({
+    outcome: { outcome: 'selected', optionId: 'reject-once' },
+  })
+  const fsReads: ReadTextFileRequest[] = []
+  // 默认「这个文件我没打开」——与真实编辑器最常见的情形一致，也让忘了设应答
+  // 的用例得到确定的回落而不是一份编出来的内容。
+  let fsReadResponder: FsReadResponder = () => {
+    throw new Error('client has no buffer for this file')
+  }
+
+  const rawSinks: ((update: unknown) => void)[] = []
+  const clientApp = createClientApp()
+    .onNotification('session/update', ({ params }) => {
+      const update = params.update as { sessionUpdate: string; content?: { text?: string } }
+      updates.push({
+        sessionId: String(params.sessionId),
+        kind: update.sessionUpdate,
+        ...(update.content?.text !== undefined ? { text: update.content.text } : {}),
+      })
+      for (const sink of rawSinks) sink(params.update)
+    })
+    .onRequest('session/request_permission', ({ params }) => {
+      permissionRequests.push(params)
+      return responder(params)
+    })
+    .onRequest('elicitation/create', ({ params }) => {
+      elicitations.push(params)
+      return elicitationResponder(params)
+    })
+    .onRequest('fs/read_text_file', ({ params }) => {
+      fsReads.push(params)
+      return fsReadResponder(params)
+    })
+  const connection = clientApp.connect(clientSide)
+
+  // 能力位是在 `initialize` 时协商的，而 elicitation 只在客户端 advertise 了
+  // `elicitation.form` 时才可用。用到征询的用例都要先握手，这里代劳；其余用例
+  // 保持原样（自己按需调 initialize）。
+  const wantsElicitation = options.elicitation ?? (options.questions === true || options.planMode === true)
+  if (wantsElicitation || options.elicitation === false || options.fsRead === true) {
+    await connection.agent.request('initialize', {
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: {
+        ...(wantsElicitation ? { elicitation: { form: {} } } : {}),
+        // 布尔位，且判定是 `=== true`：给 false 与不给在行为上等价，但这里
+        // 只在要它时给，握手摘要里就分得出「没声明」和「声明了不支持」。
+        ...(options.fsRead === true ? { fs: { readTextFile: true, writeTextFile: false } } : {}),
+      },
+    })
+  }
+
+  return {
+    ctx,
+    acp: connection.agent,
+    updates,
+    llm,
+    permissionRequests,
+    elicitations,
+    fsReads,
+    onUpdate: (sink: (update: unknown) => void) => {
+      rawSinks.push(sink)
+    },
+    setFsReadResponder: (next: FsReadResponder) => {
+      fsReadResponder = next
+    },
+    setPermissionResponder: (next: PermissionResponder) => {
+      responder = next
+    },
+    setElicitationResponder: (next: ElicitationResponder) => {
+      elicitationResponder = next
+    },
+    disposeBridge: () => {
+      ctx.registry.delete(bridge)
+    },
+    hasAgent: (sessionId: string) => ctx.agents.get(sessionId as never) !== undefined,
+    waitPersisted: async (sessionId: string, timeoutMs = 10_000) => {
+      const persistence = ctx.get('sessionPersistence')
+      if (persistence === undefined) throw new Error('harness has no persistence mounted')
+      const deadline = Date.now() + timeoutMs
+      for (;;) {
+        const headers = await persistence.list()
+        if (headers.some((h) => String(h.id) === sessionId)) return
+        if (Date.now() > deadline) throw new Error(`session ${sessionId} never persisted`)
+        await new Promise((r) => setTimeout(r, 25))
+      }
+    },
+  }
+}

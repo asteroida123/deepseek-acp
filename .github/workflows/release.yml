@@ -1,0 +1,74 @@
+name: Release
+
+# 打 tag 即发布：
+#
+#     npm version patch      # 改 package.json 并打上 vX.Y.Z
+#     git push --follow-tags
+#
+# 认证走 npm trusted publishing（OIDC）：仓库里**没有** npm token，凭证由
+# GitHub 在运行时现签，npm 按「哪个仓库的哪个工作流文件」核对身份。因此
+# **本文件的文件名是身份的一部分**——改名要同步改 npmjs.com 上的配置，
+# 否则表现是一句看不出原因的鉴权失败。一次性设置见 CONTRIBUTING.md。
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  id-token: write # OIDC 取证，trusted publishing 必需
+  contents: write # 建 GitHub Release
+
+jobs:
+  publish:
+    name: 发布到 npm
+    # 发布产物是平台无关的（TS 编译出的 JS），选 macOS 只为**测试闸门**：
+    # 沙箱用例在 macOS 上走系统自带的 Seatbelt，是本项目验证过的路径；
+    # Linux 要另装 bwrap 且受 runner 的 user namespace 策略影响。CI 那条
+    # 工作流仍然覆盖 ubuntu——发布不该因为某个平台的沙箱后端而卡住。
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          # 发布构建不吃缓存：产物要能从源码复现，不掺上一次跑剩的东西。
+          package-manager-cache: false
+
+      # trusted publishing 要求 npm >= 11.5.1。Node 24 自带的通常够，但具体
+      # 版本随 runner 镜像漂移。钉主版本而不是 @latest：npm 出下一个大版本时，
+      # 不希望在发布当口才发现行为变了。
+      - run: npm i -g npm@^11.5.1
+
+      - run: npm ci
+
+      # tag 与 package.json 必须一致。不一致时 npm 发的是 package.json 里的
+      # 版本号，而 GitHub 上挂着另一个——两边从此对不上，且发布不可撤销。
+      - name: 校验 tag 与 package.json 版本一致
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag $GITHUB_REF_NAME 对应 $tag，package.json 是 $pkg"
+            exit 1
+          fi
+
+      - run: npm run typecheck
+
+      - run: npm run build
+
+      - run: npm test
+
+      # `prepublishOnly` 会把上面三步连同 preflight 再跑一遍（8 秒的事）。
+      # 重复是故意的：那道钩子同时守着**本地**手工发布，不能只依赖这里；
+      # 而这里拆成独立 step，是为了让失败落在自己的名字上而不是埋进发布日志。
+      #
+      # 不加 --provenance：OIDC 发布时 npm 自动生成溯源证明。
+      # 不加 --access public：无 scope 的包本来就是公开的。
+      - run: npm publish
+
+      - name: 建 GitHub Release
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

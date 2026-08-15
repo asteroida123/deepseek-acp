@@ -1,0 +1,37 @@
+# 开发阶段材料
+/.docs/
+/reference/
+/spikes/
+/CHANGELOG.md
+/RELEASING.md
+
+# 构建产物
+/lib/
+*.tsbuildinfo
+
+# 依赖
+node_modules/
+
+# 打包产物
+*.tgz
+
+# 覆盖率
+/coverage/
+
+# 会话日志
+.sessions/
+
+# 凭据
+.env
+.env.*
+!.env.example
+.credentials.yaml
+.credentials.yml
+*.pem
+
+# 编辑器与系统
+.DS_Store
+.vscode/
+.idea/
+*.swp
+.claude/settings.local.json

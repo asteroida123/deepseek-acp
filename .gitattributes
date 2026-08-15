@@ -1,0 +1,10 @@
+# 统一行尾。ACP 是 ndJSON over stdio，源码里混进 CRLF 不会立刻炸，
+# 但会让子进程级的 stdout 用例在 Windows 检出上以看不懂的方式失败。
+* text=auto eol=lf
+
+# 二进制 / 生成物，不做行尾转换也不参与 diff
+*.png binary
+*.jpg binary
+
+# 仓库里没有 vendored 代码，也没有大段文档目录（`.docs/`、`reference/`、`spikes/`
+# 都留在本地、不进版本库），所以不需要 linguist-* 覆盖。
