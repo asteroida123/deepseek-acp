@@ -77,11 +77,34 @@ export type FsReadResponder = (
   request: ReadTextFileRequest,
 ) => ReadTextFileResponse | Promise<ReadTextFileResponse>
 
+/** 一条被 harness 收下的 cordis 日志记录。 */
+export interface CapturedLog {
+  /** `info` / `warn` / `error` / `debug` */
+  type: string
+  /** 记录器名，形如插件名 */
+  name: string
+  /** 拼好的正文 */
+  text: string
+}
+
 export interface TestHarness {
   ctx: Context
   /** 驱动 agent 侧方法的客户端 context */
   acp: ClientContext
   updates: CapturedUpdate[]
+  /**
+   * 这个 harness 收到的全部日志记录，按到达顺序。
+   *
+   * **为什么用例需要它**：上游把「后台写入失败」这类事故只报给 `ctx.logger`
+   * （例如持久化的 `reportBackgroundFailure`），而不抛给调用方。生产侧在 `boot()`
+   * 里装了 stderr exporter，测试装配路径**故意没装**（每个用例都吐一遍日志会淹掉
+   * 真正的失败输出）——代价是这些线索在用例里全部落空。
+   *
+   * 结果就是 TC-LOAD-01 那个偶发：日志里出现重复的 seq 批次，只能推断「字节已落盘
+   * 却被判为失败」，但**究竟是哪个错误触发的重试，无从得知**。这里把记录收下来，
+   * 下次复现时能直接说出是 EMFILE、EIO 还是 rollback 失败，而不是继续猜。
+   */
+  logs: CapturedLog[]
   /** 可编排的假模型 */
   llm: FakeLlmAdapter
   /** 客户端收到的授权请求，按到达顺序 */
@@ -225,6 +248,25 @@ export async function createHarness(
   } = {},
 ): Promise<TestHarness> {
   const ctx = new Context()
+  const logs: CapturedLog[] = []
+  // 装在挂任何插件**之前**：exporter 只对注册之后的记录生效，晚一步就漏掉装配期
+  // 的告警——而装配期恰恰是最容易出事又最难看出来的那一段。
+  //
+  // 不往 stderr 打：`boot.ts` 里那条注释是对的，每个用例都吐一遍日志会淹掉真正的
+  // 失败输出。收进数组，谁需要谁去读（`h.logs`）；真出事时由用例自己打出来。
+  ctx.logger.exporter({
+    colors: false,
+    // 不写 `levels` 时生效等级是 1，`warn`(2) 与 `debug`(3) 会被静默丢掉——而
+    // 上游报告后台失败用的正是 `warn`。用例里全都收下，判断交给用例自己。
+    levels: { default: 3 },
+    export(message: { type: string; name: string; args: unknown[] }) {
+      logs.push({
+        type: message.type,
+        name: message.name,
+        text: message.args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '),
+      })
+    },
+  })
   for (const plugin of [SystemPrompt, SessionService, LlmService, ToolRegistry, AgentRegistry, AgentLoop, ApprovalService]) {
     await ctx.plugin(plugin, {})
   }
@@ -364,6 +406,7 @@ export async function createHarness(
     ctx,
     acp: connection.agent,
     updates,
+    logs,
     llm,
     permissionRequests,
     elicitations,

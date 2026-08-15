@@ -254,11 +254,17 @@ export async function composeAgent(ctx: Context, options: { sessionsRoot: string
  * 连接。有子进程级用例守着这条。
  * @param ctx - 根 context
  */
-function installStderrLog(ctx: Context): void {
+export function installStderrLog(ctx: Context): void {
   ctx.logger.exporter({
     // 颜色交给终端：编辑器多半把 agent 的 stderr 原样收进日志面板，ANSI 码在
     // 那里是噪声。
     colors: false,
+    // **必须显式放开到 warn**。cordis 的等级是 error=0 / info=1 / warn=2 /
+    // debug=3，而 exporter 不写 `levels` 时生效等级是 **1**——于是 `warn` 被
+    // 整个丢弃。上面那段注释说「没有 exporter 这些 warn 就落空」，只说对了一半：
+    // 装了 exporter 但不放等级，它们照样落空，而且看起来像是已经接好了。
+    // 不放到 3：`debug` 是给排查开的，默认吐出来只会淹没真正的线索。
+    levels: { default: 2 },
     export(message) {
       const parts = message.args.map((arg) => (typeof arg === 'string' ? arg : JSON.stringify(arg)))
       process.stderr.write(`[${message.type}] ${message.name}: ${parts.join(' ')}\n`)

@@ -41,6 +41,12 @@ async function recordSession(
   h.disposeBridge()
   await waitFor(() => !h.hasAgent(String(sessionId)), 5_000, 'agent teardown')
   await h.retire()
+  // 录制期不许有后台失败。上游把这类事故只报给 `ctx.logger`（持久化的
+  // `reportBackgroundFailure` 就是），不抛给调用方——不看这里，一次「写失败并重试」
+  // 的表现就只是稍后恢复时一句没头没尾的 `Internal error`。这条断言把错误本身
+  // 印在失败消息里，让下次复现自己说出原因。
+  const trouble = h.logs.filter((l) => l.type === 'warn' || l.type === 'error')
+  expect(trouble.map((l) => `[${l.type}] ${l.name}: ${l.text}`), '录制期出现后台失败').toEqual([])
   return { sessionId: String(sessionId), updates: h.updates }
 }
 

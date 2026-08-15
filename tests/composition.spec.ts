@@ -18,7 +18,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { EXIT_PLAN_MODE } from '@deepseek-ai/dsh-plan-mode'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { describe, expect, it } from 'vitest'
-import { PLAN_SECTION, composeAgent } from '../src/launcher/boot.js'
+import { PLAN_SECTION, composeAgent, installStderrLog } from '../src/launcher/boot.js'
 import { createInProcessPort } from '../src/port/in-process.js'
 import { waitFor } from './harness.js'
 
@@ -166,4 +166,40 @@ describe('TC-COMP-03 后台任务关闭', () => {
     // 失败当成自己参数写错。
     expect(Object.keys(params.properties ?? {})).not.toContain('run_in_background')
   }, 30_000)
+})
+
+describe('TC-COMP-06 stderr 日志放到 warn', () => {
+  /** 装上生产侧的 exporter，收集它写往 stderr 的内容。 */
+  function captureStderr(): { lines: string[]; restore: () => void } {
+    const lines: string[] = []
+    const original = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+      lines.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString())
+      return true
+    }) as typeof process.stderr.write
+    return { lines, restore: () => void (process.stderr.write = original) }
+  }
+
+  it('warn 真的写得出去 —— 装了 exporter 不等于放行了等级', () => {
+    // 这条守的是一个**曾经就是这样错着的**配置：cordis 的等级是 error=0 /
+    // info=1 / warn=2 / debug=3，exporter 不写 `levels` 时生效等级是 1，于是
+    // 所有 `warn` 被静默丢弃。而 bridge 里「通知失败」「审批因断连被拒」
+    // 「呈现器抛错」这些**只**报 warn——真实二进制里一条都不会出现，且看起来
+    // 像是日志已经接好了。
+    const ctx = new Context()
+    installStderrLog(ctx)
+    const cap = captureStderr()
+    try {
+      ctx.logger.warn('探针：warn 必须可见')
+      ctx.logger.error('探针：error 必须可见')
+      ctx.logger.debug('探针：debug 不该出现')
+    } finally {
+      cap.restore()
+    }
+    const all = cap.lines.join('')
+    expect(all, 'warn 被等级过滤掉了：exporter 需要 levels: { default: 2 }').toContain('探针：warn 必须可见')
+    expect(all).toContain('探针：error 必须可见')
+    // debug 留在默认关闭：它是排查时才开的，默认吐出来会淹掉真正的线索。
+    expect(all).not.toContain('探针：debug 不该出现')
+  })
 })
