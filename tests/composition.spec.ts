@@ -111,6 +111,38 @@ describe('TC-COMP-04 M1-c 的服务都在', () => {
   })
 })
 
+describe('TC-COMP-07 技能栈（US-27）', () => {
+  it('注册表与模型侧工具都在 —— 三件一套缺一不可', async () => {
+    const ctx = await composed()
+    // 注册表在，说明 `dsh-skill` 挂上了；bridge 靠 `ctx.get('skills')` 决定要不要
+    // 把技能并进斜杠目录，缺了它整个功能静默消失。
+    expect(ctx.get('skills')).toBeDefined()
+    // `skill` 工具在，说明 `dsh-tool-skill` 挂上了。只挂注册表不挂它，模型侧
+    // 一无所知——技能只剩用户手动敲一条路。
+    expect(ctx.tools?.get('skill')).toBeDefined()
+  }, 30_000)
+
+  it('本地提供方已注册 —— 只挂注册表等于一个永远空的目录', async () => {
+    const ctx = await composed()
+    // 注册表不暴露提供方列表，所以从行为侧验：能列出来（哪怕是空的）而不抛，
+    // 就说明 `list()` 走通了整条提供方链。这台机器上有没有技能不影响判定。
+    await expect(ctx.get('skills')?.list({ cwd: tmpdir() })).resolves.toBeInstanceOf(Array)
+  }, 30_000)
+
+  it('不挂 skill-badge —— 上游交付的 CLI 也把它声明为禁用', async () => {
+    const ctx = await composed()
+    // 徽章提供方会贡献一个名为 `dsh` 的 bundled 技能。它出现在这里，说明有人
+    // 顺手把 badge 也挂了，那是显式选择而不该是默认。
+    //
+    // 先断言注册表在：不然注册表整个消失时这条会空过一个「没有 dsh」的假绿。
+    const skills = ctx.get('skills')
+    expect(skills).toBeDefined()
+    const summaries = await skills!.list({ cwd: tmpdir() })
+    expect(summaries.map((s) => s.name)).not.toContain('dsh')
+    expect(summaries.every((s) => s.source !== 'bundled')).toBe(true)
+  }, 30_000)
+})
+
 describe('TC-COMP-05 文件工具在沙箱之下', () => {
   it('ctx.fs 报告 workspace-write —— 缺了它，write/edit 全程无约束', async () => {
     const ctx = await composed()

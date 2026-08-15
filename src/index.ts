@@ -182,10 +182,20 @@ export function apply(ctx: Context, config: AcpBridgeConfig & ApplyOptions = {})
   })
 
   // 注册表变更会影响全局视图或某个 agent 的遮蔽层，事件本身分辨不出是哪种，
-  // 于是逐个会话各自重新解析（US-18）。
-  const offCommands = port.commands?.onChange(() => {
-    refreshCommands(bridge)
-  })
+  // 于是逐个会话各自重新解析（US-18 命令 / US-27 技能）。
+  //
+  // 两条事件走**同一个**刷新：一条 `available_commands_update` 里两个来源都在，
+  // 只重算一半是不可能的。技能那条来自文件 watcher（新建一个 SKILL.md 就会响），
+  // 因此这里比命令那条频繁得多。
+  const refresh = (): void => {
+    // 刷新现在是异步的，且是从事件回调里发起的——没有人接这个 promise。失败必须
+    // 就地咽掉：一次目录刷新失败不该变成 unhandled rejection 打死进程。
+    void refreshCommands(bridge).catch((error: unknown) => {
+      bridge.warn(`command catalog refresh failed: ${String(error)}`)
+    })
+  }
+  const offCommands = port.commands?.onChange(refresh)
+  const offSkills = port.skills?.onChange(refresh)
 
   const offAgentError = port.events.onAgentError((agent, turn, error) => {
     const record = table.ownedBy(agent)
@@ -310,6 +320,7 @@ export function apply(ctx: Context, config: AcpBridgeConfig & ApplyOptions = {})
     offSessionEvent()
     offClaimed()
     offCommands?.()
+    offSkills?.()
     offAgentError()
     // 先摘掉审批应答器：teardown 期间再来的问题应当落到链尾的 fail-closed
     // 默认值，而不是发往一条正在关闭的连接。

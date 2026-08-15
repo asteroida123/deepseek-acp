@@ -43,7 +43,7 @@ export async function handleResumeSession(
   // 命令目录仍要推：它是**当前**注册表的快照，与历史无关，而客户端刚建立这条
   // 会话的运行时视图，不给就只有一个空的命令面。会话 id 是客户端自己给的，
   // 不需要 `session/new` 那套延后。
-  const commands = commandsUpdate(bridge, record)
+  const commands = await commandsUpdate(bridge, record)
   if (commands !== undefined) await bridge.notifyAwaited(record.acpSessionId, [commands])
 
   // 沙箱模式与 plan 状态写在会话日志里，因此这里读到的是**恢复出来的**状态，

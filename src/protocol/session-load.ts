@@ -164,7 +164,7 @@ export async function handleLoadSession(
   })
   // 命令快照跟在历史后面一起发。这里不需要 `session/new` 那套延后：会话 id 是
   // **客户端自己给的**，它早就认识这个会话。
-  const commands = commandsUpdate(bridge, record)
+  const commands = await commandsUpdate(bridge, record)
   await bridge.notifyAwaited(sessionId, commands === undefined ? replay : [...replay, commands])
 
   // 沙箱模式与 plan 状态都写在会话日志里，因此这里读到的是**恢复出来的**那个

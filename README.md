@@ -49,6 +49,7 @@ DeepSeek Harness 自带一个 ACP server（`@deepseek-ai/dsh-acp`），但它的
 | 会话恢复 / 列表 | ✗ 关掉即消失 | ✅ `load` / `list` / `resume` / `close`，带标题 |
 | 会话内换模型 | ✗ | ✅ 模型、推理档位、文件权限三个选择器 |
 | slash 命令 | ✗ | ✅ 命令目录，不进模型 |
+| 技能（skills） | ✗ | ✅ 模型按需加载；用户可调用的进斜杠补全 |
 | 模型向你提问 | ✗ | ✅ 表单征询；客户端不支持时降级成按钮 |
 | MCP server | ✗ 非空即拒绝 | ✅ 按会话挂载，stdio + HTTP，会话间隔离 |
 | 上下文用量 | ✗ | ✅ `usage_update` 进度条 |
@@ -65,8 +66,10 @@ DeepSeek Harness 自带一个 ACP server（`@deepseek-ai/dsh-acp`），但它的
 `ask_user_question`、`exit_plan_mode`。
 
 **刻意不做的**：`fs/write_text_file` 委托（会绕开沙箱围栏，让「文件权限」选择器形同虚设）、
-后台任务（自发回合发出的更新没有对应的 `stopReason` 归属）。**受阻于上游的**：图片输入、
-`session/delete`、MCP 的 `sse` / `acp` 传输。
+后台任务（自发回合发出的更新没有对应的 `stopReason` 归属）、上游的 `packages/extensions/`
+（`cordis_define` / `cordis_run` 那套「模型改写自身运行时」——它在 `node:vm` 里跑、拿到活的
+服务门面，绕开上面那道围栏；且它的启动控件是浏览器半边，没发布到 npm）。**受阻于上游的**：
+图片输入、`session/delete`、MCP 的 `sse` / `acp` 传输。
 
 ---
 

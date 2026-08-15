@@ -26,12 +26,15 @@ import JsonlPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SessionProjections from '@deepseek-ai/dsh-session-projection'
 import SessionTitle from '@deepseek-ai/dsh-session-title'
 import * as ShellEnv from '@deepseek-ai/dsh-shell-env'
+import SkillRegistry from '@deepseek-ai/dsh-skill'
+import * as SkillFilesystem from '@deepseek-ai/dsh-skill-filesystem'
 import SpillStore from '@deepseek-ai/dsh-spill'
 import LocalSubprocess from '@deepseek-ai/dsh-subprocess-local'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import * as AskUserTool from '@deepseek-ai/dsh-tool-ask-user'
 import * as BashTool from '@deepseek-ai/dsh-tool-bash'
 import * as FsSearchTool from '@deepseek-ai/dsh-tool-fs-search'
+import * as ToolSkill from '@deepseek-ai/dsh-tool-skill'
 import * as TodoTool from '@deepseek-ai/dsh-tool-todo'
 import ToolRegistry from '@deepseek-ai/dsh-tools'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
@@ -214,6 +217,35 @@ export async function composeAgent(ctx: Context, options: { sessionsRoot: string
   // `sampleOverCapGlobResults: false` —— 超额时给前 N 条而非随机抽样。抽样结果
   // 无法复现，模型基于它做的判断也就无法复核。
   await ctx.plugin(FsSearchTool, { sampleOverCapGlobResults: false })
+
+  // ── 技能（US-27）────────────────────────────────────────────────────
+  // 三件一套，缺一不可：注册表是空的接线板，提供方往里填，工具把它端给模型。
+  //
+  // **挂在根 context 而不是会话作用域。** 与文件工具那条相反的选择，理由也相反：
+  // `tool-fs` 必须看到会话级替换过的 `ctx.fs`，而技能发现要的恰恰是部署级的那份
+  // ——技能目录不随会话变，变的只有 cwd，而 cwd 是 `list()` 的入参。
+  await ctx.plugin(SkillRegistry, {})
+  // 本地提供方。扫的根按 rank 从高到低：`<项目根>/.dsh/skills`、
+  // `<项目根>/.agents/skills`、`$DSH_HOME/skills`（默认 `~/.dsh`）、
+  // `$DSH_AGENTS_HOME/skills`（默认 `~/.agents`）。归结成两条正交的规则：项目级
+  // 压过全局，专用目录压过共用目录。TC-SKILL-06 钉着这个顺序（它是上游常量，改了
+  // 我们这边不会有任何用例自己变红）。
+  //
+  // **`.agents` 那两个是与其它 agent 工具共用的目录**——挂上这个插件，别的工具放在
+  // 那里的技能会一并被发现并进入 DeepSeek 的上下文。这是有意为之（写过一次的技能
+  // 不该按工具再写一遍），但它足够意外，值得在这里留一句。
+  //
+  // 它经 `ctx.fs` 读盘，而我们挂的是 `SandboxedFileSystem`。不受影响：那一层
+  // 只对 `write` / `edit` 两个变更加围栏，读在任何模式下都直通。
+  await ctx.plugin(SkillFilesystem, {})
+  // 模型侧：注册 `skill` 工具，并在每个步骤前把目录作为持久 `<system-reminder>`
+  // 注入。**注入的目录与技能正文都不会漏给客户端**——它们落在会话日志里的
+  // source kind 是 `skill-catalog` / `skill-invocation`，而 `mapEvent` 对
+  // `user/message` 的过滤是白名单（只放 `kind: 'user'`）。TC-SKILL-04 钉着这条。
+  //
+  // 不挂 `dsh-skill-badge`：那是随包的徽章技能，上游自己交付的 CLI 也把它声明为
+  // 禁用，启用它是显式选择而不是默认。
+  await ctx.plugin(ToolSkill, {})
 
   // ── shell ───────────────────────────────────────────────────────────
   // `bash-sandbox` 而非 `bash-local`：文件工具已经在 `workspace-write` 之下，

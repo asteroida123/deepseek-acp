@@ -74,7 +74,7 @@ export async function handleNewSession(
 
   // 命令目录只能经 `available_commands_update` 给出（应答里没有这个字段），
   // 而这条更新必须排在应答之后 —— 会话 id 是应答首次告知客户端的。
-  const commands = commandsUpdate(bridge, record)
+  const commands = await commandsUpdate(bridge, record)
   if (commands !== undefined) bridge.notifyAfterResponse(sessionId, commands)
 
   // 配置项**随应答一起给出**——ACP 没有「支持配置项」的能力位，带回 `configOptions`

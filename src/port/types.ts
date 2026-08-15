@@ -159,6 +159,39 @@ export interface CommandPlane {
   onChange(sink: () => void): () => void
 }
 
+/** 一条**用户可调用**技能的发现元数据（US-27）。 */
+export interface SkillInfo {
+  /** kebab-case 技能名，不带前导斜杠 */
+  readonly name: string
+  /** 已按 {@link SkillPlane.list} 的约定截断 */
+  readonly description: string
+}
+
+/**
+ * 技能面（US-27）。
+ *
+ * 只暴露**用户可调用**的那一半。模型侧完全不经过这里：`dsh-tool-skill` 自己在
+ * `agent/pre-step` 注入目录、自己注册 `skill` 工具、自己扫 `/名字` 手势，本
+ * bridge 一个字都不用转译。这里做的事只有一件——把技能名喂进编辑器的斜杠补全，
+ * 否则用户得先知道技能叫什么才敲得出来，功能等于藏着。
+ *
+ * 组合没挂 `ctx.skills` 时整体为 undefined。
+ */
+export interface SkillPlane {
+  /**
+   * 该会话可见的用户可调用技能。
+   *
+   * **异步**（提供方可能是远程的），这是它与 {@link CommandPlane.list} 唯一的
+   * 结构差异。发现失败、超时、被取消时返回空数组而不是抛：技能列表是锦上添花，
+   * 不该让建会话失败——代价只是这一次列表里没有技能。
+   * @param agent - 观察作用域；技能与工具一样可以注册在 agent 层遮蔽全局同名项
+   * @param cwd - 工作区，决定 `<项目根>/.dsh/skills` 那两个根扫哪里
+   */
+  list(agent: Agent, cwd: string | undefined): Promise<readonly SkillInfo[]>
+  /** 目录变更订阅；返回取消订阅函数 */
+  onChange(sink: () => void): () => void
+}
+
 /**
  * 会话模式面（US-19）。
  *
@@ -224,6 +257,8 @@ export interface HarnessPort {
   readonly catalog: SessionCatalog | undefined
   /** 人类命令面；组合没挂命令注册表时 undefined */
   readonly commands: CommandPlane | undefined
+  /** 技能面；组合没挂 `ctx.skills` 时 undefined */
+  readonly skills: SkillPlane | undefined
   /** 会话模式面；组合没挂 plan-mode 时 undefined */
   readonly modes: ModePlane | undefined
   /**

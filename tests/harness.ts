@@ -6,6 +6,7 @@
  * @module
  */
 
+import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import {
   PROTOCOL_VERSION,
@@ -32,6 +33,9 @@ import type {} from '@deepseek-ai/dsh-session-persistence'
 import JsonlPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SessionTitle from '@deepseek-ai/dsh-session-title'
 import * as ShellEnv from '@deepseek-ai/dsh-shell-env'
+import SkillRegistry from '@deepseek-ai/dsh-skill'
+import * as SkillFilesystem from '@deepseek-ai/dsh-skill-filesystem'
+import * as ToolSkill from '@deepseek-ai/dsh-tool-skill'
 import SpillStore from '@deepseek-ai/dsh-spill'
 import LocalSubprocess from '@deepseek-ai/dsh-subprocess-local'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -261,6 +265,12 @@ export async function createHarness(
     title?: boolean
     fs?: boolean
     fsRead?: boolean
+    /**
+     * 挂技能栈，并把用户级技能根**关进这个目录**（`<它>/dsh-home`、
+     * `<它>/agents-home`）。给路径而不是布尔，就是为了让「不许扫到本机家目录」
+     * 无法被忘记。项目级的根仍由会话 cwd 决定。
+     */
+    skills?: string
   } = {},
 ): Promise<TestHarness> {
   const ctx = new Context()
@@ -299,6 +309,25 @@ export async function createHarness(
   // 文件系统底座。文件工具**不**在这里挂：它随会话装（`mountSessionFs`），
   // 这样会话级的读改道才可能生效。
   if (options.fs === true) await ctx.plugin(LocalFileSystem, {})
+  // 技能栈（US-27）。`skill-filesystem` 经 `ctx.fs` 读盘，所以顺带把它挂上。
+  //
+  // **`dshHome` 与 `agentsHome` 必须显式指向临时目录。** 不给的话它们默认落到
+  // `~/.dsh/skills` 与 `~/.agents/skills`——而 `~/.agents/skills` 是与其它 agent
+  // 工具共用的目录，开发机上通常非空。用例会因此扫到开发者自己的技能，断言随
+  // 「这台机器上装了什么」而变，在 CI 上绿、在本地红（或者反过来）。这一条是
+  // 实测踩到的：调研 spike 里就意外列出了三个本机技能。
+  if (options.skills !== undefined) {
+    if (options.fs !== true) await ctx.plugin(LocalFileSystem, {})
+    await ctx.plugin(SkillRegistry, {})
+    await ctx.plugin(SkillFilesystem, {
+      dshHome: join(options.skills, 'dsh-home'),
+      agentsHome: join(options.skills, 'agents-home'),
+      // watcher 在用例里只会带来不确定性：目录是用例自己写的，写完就查，没有
+      // 「外部进程改了文件」这回事。关掉也就少了一份 chokidar 句柄。
+      watch: false,
+    })
+    await ctx.plugin(ToolSkill, {})
+  }
   if (options.commands === true || options.planMode === true) await ctx.plugin(CommandRuntime)
   // plan-mode 的 `exit_plan_mode` 要经 `ctx.userQuestions` 评审，因此挂 plan-mode
   // 就一并挂上这个 seam —— 否则那条链在测试里根本走不通。
@@ -339,6 +368,7 @@ export async function createHarness(
       && ctx.approval !== undefined
       && (options.shell === undefined || ctx.tools.get('bash') !== undefined)
       && (options.commands !== true || ctx.get('commands') !== undefined)
+      && (options.skills === undefined || ctx.get('skills') !== undefined)
       && (options.planMode !== true || ctx.get('planMode') !== undefined),
     5_000,
     'dsh services',

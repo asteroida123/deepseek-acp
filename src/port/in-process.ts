@@ -26,6 +26,9 @@ import { foldSessionTitle } from '@deepseek-ai/dsh-session-title'
 // 取用；没有这两行，`get` 的返回值退化成 any，下面的窄化就静默失去类型检查。
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-plan-mode'
+// 技能注册表同样是可选组合件。这一行**不是**纯类型导入：`isUserInvocable` 是个
+// 读 `invocation.userInvocable` 的纯函数谓词，自己判等于把上游的策略规则抄一遍。
+import { isUserInvocable } from '@deepseek-ai/dsh-skill'
 import * as McpClient from '@deepseek-ai/dsh-mcp-client'
 import * as FsTool from '@deepseek-ai/dsh-tool-fs'
 import { mountSessionFs, type ClientTextReader } from '../composition/session-fs.js'
@@ -40,6 +43,7 @@ import type {
   SessionCatalog,
   SessionControls,
   SessionSummary,
+  SkillPlane,
 } from './types.js'
 
 /** 本插件需要注入的服务名。 */
@@ -52,6 +56,46 @@ export const REQUIRED_SERVICES = ['agents'] as const
  * 变成串行 IO。
  */
 const LIST_READ_CONCURRENCY = 8
+
+/**
+ * 技能发现的等待上限（毫秒）。
+ *
+ * 本项目默认只挂本地提供方（读几个目录，毫秒级），这个上限对它形同不存在。它挡的
+ * 是宿主自己 `registerProvider` 进来的远程源：注册表**会**把 `signal` 透传给提供方
+ * 并在取消后停止等待，所以超时能把「会话永远打不开」降级成「这一次列表里没有技能」。
+ *
+ * 数值取 2 秒：斜杠补全的目录是打开会话时算的，用户此刻在等界面，再久就该先给他
+ * 一个能用的会话。
+ */
+const SKILL_DISCOVERY_TIMEOUT_MS = 2_000
+
+/**
+ * 技能描述在**斜杠补全里**的长度上限。
+ *
+ * `SkillSummary.description` 本身没有上限——`dsh-tool-skill` 那个 500 字的上限只
+ * 作用于模型侧目录渲染，管不到这里。frontmatter 里写一整段的技能是存在的（本机
+ * `~/.agents/skills` 里就有），原样塞进下拉框会把列表撑坏。
+ */
+const SKILL_DESCRIPTION_MAX = 120
+
+/**
+ * 单行化并截断到 `max` 个**码位**。
+ *
+ * 按码位而非 `.length` 切：后者切的是 UTF-16 码元，正好落在代理对中间时会产出半个
+ * 字符，客户端那边显示成替换符。中文全在 BMP 里察觉不到，emoji 一试就现形。
+ *
+ * 先把换行折成空格：frontmatter 的 `description` 允许多行，而这个值要进的是下拉框
+ * 的一行。
+ * @param text - 原文
+ * @param max - 上限（含省略号）
+ * @returns 单行、不超过 max 个码位的文本
+ */
+function truncate(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, ' ').trim()
+  const points = [...flat]
+  if (points.length <= max) return flat
+  return `${points.slice(0, max - 1).join('')}…`
+}
 
 /**
  * 带并发上限的 map，保持输入顺序。
@@ -107,6 +151,7 @@ export function createInProcessPort(ctx: Context): HarnessPort {
   const persistence = ctx.get('sessionPersistence')
   const commandRuntime = ctx.get('commands')
   const planMode = ctx.get('planMode')
+  const skillRegistry = ctx.get('skills')
 
   /** 会话工作区那一段；新建与恢复共用，两条路径的上下文必须一致。 */
   const workspaceSection = (agentCtx: Context, cwd: string | undefined): void => {
@@ -323,6 +368,35 @@ export function createInProcessPort(ctx: Context): HarnessPort {
           },
         }
 
+  const skills: SkillPlane | undefined =
+    skillRegistry === undefined
+      ? undefined
+      : {
+          async list(agent: Agent, cwd: string | undefined) {
+            // 有界等待：见 SKILL_DISCOVERY_TIMEOUT_MS。`AbortSignal.timeout` 的定时器
+            // 是 unref 的，不会把进程留住。
+            const signal = AbortSignal.timeout(SKILL_DISCOVERY_TIMEOUT_MS)
+            let summaries
+            try {
+              // `scope` 传 agent 而非省略：技能与工具一样分层，省略只读全局层，
+              // 会漏掉挂在这个 agent 组合里的那些。传错 scope 不报错，只少东西。
+              summaries = await skillRegistry.list({ scope: agent, signal, ...(cwd === undefined ? {} : { cwd }) })
+            } catch (error: unknown) {
+              // 超时、取消、提供方炸了——都退化成「这一次没有技能」。斜杠补全少几项
+              // 是可以接受的，建会话失败不是。
+              ctx.logger?.warn?.(`skill discovery failed: ${String(error)}`)
+              return []
+            }
+            return summaries.filter(isUserInvocable).map((skill) => ({
+              name: skill.name,
+              description: truncate(skill.description, SKILL_DESCRIPTION_MAX),
+            }))
+          },
+          onChange(sink: () => void) {
+            return ctx.on('skills/change', sink)
+          },
+        }
+
   const modes: ModePlane | undefined =
     planMode === undefined
       ? undefined
@@ -342,6 +416,7 @@ export function createInProcessPort(ctx: Context): HarnessPort {
     tools,
     catalog,
     commands,
+    skills,
     modes,
     sandboxModes: ctx.get('sandboxPolicy') === undefined ? [] : SANDBOX_MODES,
     async listModels(provider: string) {
