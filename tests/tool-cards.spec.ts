@@ -110,11 +110,9 @@ describe('TC-CARD-01 真实回合里的工具卡片', () => {
     expect(done).toMatchObject({
       toolCallId: 'c-2',
       status: 'completed',
-      // **结果卡的标题不相对化**——`toolResultUpdate` 把 `view.title` 原样透传，
-      // 没走 `displayTitle`。这里断言的是现状，不是认可：卡片在完成那一刻会从
-      // 「Write b.ts」跳成「Wrote /很长的/绝对路径/b.ts」，而 paths.ts 给出的理由
-      // （标题是给人看的）对结果侧同样成立。要改的是 src，不是这条断言。
-      title: `Wrote ${file}`,
+      // 结果卡的标题与调用卡同规则相对化 —— 否则同一张卡在完成那一刻会从
+      // 「Write b.ts」跳成「Wrote /很长的/绝对路径/b.ts」。
+      title: 'Wrote b.ts',
       // 结果侧也发 diff：否则模型可见的结果文本会把调用侧的 diff 冲掉
       content: [{ type: 'diff', path: file, oldText: null, newText: 'yo' }],
     })

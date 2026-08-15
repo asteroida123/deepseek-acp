@@ -159,11 +159,18 @@ export function toolResultUpdate(
   }
 
   if (view.card === 'diff') {
+    // 标题相对化，与调用侧同一条规则。少了这一步，卡片在完成那一刻会从
+    // 「Write b.ts」跳成「Wrote /很长的/绝对路径/b.ts」——同一张卡、同一个文件，
+    // 只因为换了半边代码就换了写法。
+    //
+    // `DiffResultView` 没有 `locations`（调用侧的 `DiffCallView` 才有），所以主路径
+    // 只能取第一条 diff。`content` 里的 path 仍然保持绝对：那是给编辑器跳转用的。
+    const rawPath = view.diffs[0]?.path
     return {
       sessionUpdate: 'tool_call_update',
       toolCallId: callId,
       status,
-      ...title,
+      ...(view.title !== undefined ? { title: displayTitle(view.title, rawPath, terminal.cwd) } : {}),
       content: view.diffs.map((d) => ({ type: 'diff', path: d.path, oldText: d.oldText, newText: d.newText })),
     }
   }

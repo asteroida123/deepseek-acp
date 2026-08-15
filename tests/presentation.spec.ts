@@ -363,6 +363,23 @@ describe('TC-MAP-06 路径呈现', () => {
     expect(update.locations).toEqual([{ path: '/work/repo/a.ts' }])
   })
 
+  it('结果卡的标题也相对化 —— 否则同一张卡完成时会换个写法', () => {
+    const update = toolResultUpdate(
+      CID,
+      { card: 'diff', title: 'Wrote /work/repo/a.ts', diffs: [{ path: '/work/repo/a.ts', oldText: null, newText: 'hi' }] },
+      false,
+      withTerminal,
+    )
+    // 标题给人看：相对。diff 的 path 给编辑器定位：绝对。
+    expect(update.title).toBe('Wrote a.ts')
+    expect(update.content).toEqual([{ type: 'diff', path: '/work/repo/a.ts', oldText: null, newText: 'hi' }])
+  })
+
+  it('结果卡没给标题时不凭空造一个 —— 保留调用侧的标题', () => {
+    const update = toolResultUpdate(CID, { card: 'diff', diffs: [{ path: '/work/repo/a.ts', oldText: null, newText: 'hi' }] }, false, withTerminal)
+    expect(update).not.toHaveProperty('title')
+  })
+
   it('insideWorkspace 边界', () => {
     expect(insideWorkspace('/work/repo/a', WS)).toBe(true)
     expect(insideWorkspace('/work/repo', WS)).toBe(false)
