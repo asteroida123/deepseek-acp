@@ -123,7 +123,9 @@ git push --follow-tags
 2. npmjs.com → 该包 → Settings → Trusted Publisher → GitHub Actions，填
    Organization/user、Repository、**Workflow filename 填 `release.yml`**
    （只填文件名，带扩展名），Environment 留空。
-3. 同页把 token 发布权限收成 **Disallow tokens**，让 OIDC 成为唯一入口。
+3. Settings → **Publishing access** 选 **"Require two-factor authentication and disallow
+   bypass 2fa tokens"**。它禁掉的是**绕过 2FA 的 token**，不是本机发布：维护者本人
+   带 2FA 照样能发，只是无人值守发布从此只剩「本仓库的 `release.yml` 走 OIDC」这一条路。
 
 几个会让人查半天的点：
 
