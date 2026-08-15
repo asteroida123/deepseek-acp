@@ -32,11 +32,15 @@ async function recordSession(
     sessionId: sessionId as never,
     prompt: [{ type: 'text', text: '你好' }],
   })
-  // 先释放 bridge（取消并 dispose 全部 agent，触发最终 drain），再等落盘。
-  // 顺序不能反：活着的写入链和另一个进程内 reader 读同一个文件，会读到半截日志。
+  // 先释放 bridge（取消并 dispose 全部 agent，触发最终 drain），再**彻底退休**它。
+  //
+  // 顺序不能反。用 `retire()` 而不是 `waitPersisted()`：后者的判据是「会话出现在
+  // `list()` 里」，那只是**头部**落盘的时刻，录制端的写入方仍然活着；`retire()` 等到
+  // flush 与 per-id 链都排空。恢复端随后会成为同一个日志文件的第二个写入方，让两者
+  // 在时间上不重叠是这类用例本来就该有的前提。详见 harness 里 `retire` 的注释。
   h.disposeBridge()
   await waitFor(() => !h.hasAgent(String(sessionId)), 5_000, 'agent teardown')
-  await h.waitPersisted(String(sessionId))
+  await h.retire()
   return { sessionId: String(sessionId), updates: h.updates }
 }
 

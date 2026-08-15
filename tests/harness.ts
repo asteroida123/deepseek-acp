@@ -107,8 +107,36 @@ export interface TestHarness {
    *
    * 写入是批量合并的（默认 200ms 窗口）：回合结束、乃至 agent 从注册表里消失，
    * 都**不**等于日志已经在磁盘上。直接去读会读到空目录。
+   *
+   * **它只保证「日志出现了」，不保证「写完了」**——判据是会话出现在 `list()` 里，
+   * 而那是**头部**落盘的时刻。要让另一个 harness 去读同一个 root，用 `retire()`。
    */
   waitPersisted: (sessionId: string, timeoutMs?: number) => Promise<void>
+  /**
+   * 彻底退休这个 harness：卸载整棵 ctx 并**等到**清理完成。
+   *
+   * 「录一个 harness、再用另一个 harness 从磁盘恢复」是本套件测持久化的标准手法。
+   * 它有个不明显的前提：恢复端 `session/load` 之后也会成为同一个日志文件的写入方，
+   * 所以录制端必须**先彻底停**，两个写入方不能在时间上重叠。
+   *
+   * `disposeBridge()` 达不到这个要求——它只卸 bridge 插件；`session/disposed` 触发的
+   * 上游 `retire()` 是发射后不管的（promise 只存进 `retirements`，没人 await）。
+   * `waitPersisted()` 也不行：它的判据是会话出现在 `list()` 里，那是**头部**落盘的
+   * 时刻，后续批次还没写。
+   *
+   * 这里卸的是根 fiber，于是持久化插件的 `ctx.effect` 清理函数会被执行并**被等待**：
+   * flush 全部活会话 → 等干所有 per-id 链 → 关后端。返回之后磁盘上的日志才是终态。
+   *
+   * > **这不是某个已确诊缺陷的修复。** 起因是 TC-LOAD-01 偶发失败，抓到的现场是日志
+   * > 里出现**重复的 seq 批次**（15,16,17 写了两遍），上游读取端据此拒绝加载
+   * > （`corrupt session log: seq gap in committed region`）。上游 `startWrite` 在写
+   * > 失败时会保留批次重试、`appendLines` 靠 `rollbackAppend` 截回原长度保证幂等——
+   * > 重复批次意味着「字节已落盘、却被判为失败，且回滚没能撤掉」。**触发条件至今没有
+   * > 稳定复现**：反向对照（换回旧写法）在空载与 8 路负载下各跑 10~12 次都没红，
+   * > 单独测「录制端返回时日志是否还在长」也一直是终态。所以改用 `retire()` 是把
+   * > 用例的前提写实，不能宣称它消除了那个偶发。
+   */
+  retire: () => Promise<void>
 }
 
 /** 等待条件成立。 */
@@ -354,6 +382,12 @@ export async function createHarness(
     },
     disposeBridge: () => {
       ctx.registry.delete(bridge)
+    },
+    // `ctx.fiber.dispose()` 返回的是 cordis 串起来的 `disposalTask`，await 得到的
+    // 才是「异步清理也跑完了」。`ctx.registry.delete()` 做不到——它只是同步地对
+    // 每个 fiber 调一次 `dispose()`，不等返回值。
+    retire: async () => {
+      await ctx.fiber.dispose()
     },
     hasAgent: (sessionId: string) => ctx.agents.get(sessionId as never) !== undefined,
     waitPersisted: async (sessionId: string, timeoutMs = 10_000) => {
