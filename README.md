@@ -124,6 +124,14 @@ MCP 开着时，`codeg-mcp` 会作为 server 挂进来，模型看到的工具�
 
 ---
 
+## 致谢
+
+- **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** —— 本项目的内核。
+  没有它就没有这层适配器；曾经存在过的那版编辑器向 bridge 也给了本项目大量参考。
+- **[LinuxDO](https://linux.do)** —— 本项目的起源社区。
+
+---
+
 ## 许可
 
 本项目 MIT，见 [`LICENSE`](LICENSE)。**这是一个非官方的社区适配器，与 DeepSeek
