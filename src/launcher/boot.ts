@@ -16,6 +16,7 @@ import CommandRuntime from '@deepseek-ai/dsh-commands'
 import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
 import { SandboxedFileSystem } from '@deepseek-ai/dsh-fs-sandbox'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import { installToolCallStreamGuard } from './tool-call-stream-guard.js'
 import LlmService from '@deepseek-ai/dsh-llm'
 import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek'
 import PlanMode from '@deepseek-ai/dsh-plan-mode'
@@ -307,6 +308,10 @@ export function installStderrLog(ctx: Context): void {
 export async function boot(env: NodeJS.ProcessEnv, onClosed?: () => void): Promise<Context> {
   const ctx = new Context()
   installStderrLog(ctx)
+  // 必须在第一个 LLM 请求前装好（见模块头注释：flash 经部分上游路径的
+  // 分片用显式 null 重复工具调用头，适配器的 `!== void 0` 守卫会被
+  // null 穿透，首片捕获的 id/name 被逐片覆盖成 null → 空名派发）。
+  installToolCallStreamGuard()
   await composeAgent(ctx, { sessionsRoot: sessionsRoot(env) })
   // watch 关掉：agent 是「一个客户端连接 = 一个进程」的短命子进程，热重载没有
   // 收益，而 fs watcher 会一直持有事件循环，让进程在 stdin 关闭后不退出。
