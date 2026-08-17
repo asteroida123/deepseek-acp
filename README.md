@@ -139,20 +139,25 @@ deepseek-acp --setup      # 粘 Key，回车。终端下不回显
 
 ### codeg
 
-设置 → 智能体 → **添加自定义智能体** → **手动填写**：
+codeg **已经内置**这个智能体，不用再手动添加自定义条目：设置 → 智能体，在列表里
+找到 **DeepSeek Harness**，点 **安装**；装过之后同一处变成 **升级**，跟着 codeg 内置
+注册表里的版本走。装的就是上面那条 npx 分发，不需要先 `npm i -g`。
 
-| 字段 | 值 |
+Key 填在同一页的 **DeepSeek Harness 配置** 面板：
+
+| 字段 | 说明 |
 |---|---|
-| 注册表 ID | `deepseek-acp` |
-| 显示名称 | `DeepSeek Harness` |
-| 版本 | `0.3.0` |
-| 分发信息（JSON） | `{"npx": {"package": "deepseek-acp@0.3.0", "cmd": "deepseek-acp"}}` |
-| 环境变量 | `DEEPSEEK_API_KEY=sk-...` |
-| 版本查询命令 | 留空 |
-| MCP 支持 | 开着即可 |
+| API 端点 | 留空即官方端点 |
+| API 密钥 | 以 `DEEPSEEK_API_KEY` 传给智能体；**用过 `--setup` 的话这里留空**——环境变量压过凭据文件 |
 
-「版本」要与分发信息里的版本一致——codeg 的 preflight 会对账，对不上的表现是
-连接阶段失败而不是报错。
+**保存 DeepSeek 配置** 只对**新建**的会话生效，正在跑的会话要重连才换得过来。模型与
+推理档位不在这张表里——它们是会话级选择器，在输入框里切。
+
+旧版 codeg 没有这个内置条目，仍可走 设置 → 智能体 → **添加自定义智能体** →
+**手动填写**：注册表 ID `deepseek-acp`、分发信息
+`{"npx": {"package": "deepseek-acp@0.3.0", "cmd": "deepseek-acp"}}`、环境变量
+`DEEPSEEK_API_KEY=sk-...`，版本查询命令留空。「版本」一栏要与分发信息里的版本一致
+——codeg 的 preflight 会对账，对不上的表现是连接阶段失败而不是报错。
 
 MCP 开着时，`codeg-mcp` 会作为 server 挂进来，模型看到的工具名带**会话前缀**
 （`mcp__a1_codeg-mcp__<tool>`）：`serverName` 在进程内全局唯一，而 ACP 的
