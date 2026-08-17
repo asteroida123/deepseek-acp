@@ -16,7 +16,6 @@ import CommandRuntime from '@deepseek-ai/dsh-commands'
 import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
 import { SandboxedFileSystem } from '@deepseek-ai/dsh-fs-sandbox'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
-import { installToolCallStreamGuard } from './tool-call-stream-guard.js'
 import LlmService from '@deepseek-ai/dsh-llm'
 import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek'
 import PlanMode from '@deepseek-ai/dsh-plan-mode'
@@ -41,6 +40,7 @@ import ToolRegistry from '@deepseek-ai/dsh-tools'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import UserQuestions from '@deepseek-ai/dsh-user-questions'
 import * as acpBridge from '../index.js'
+import { installToolCallStreamGuard } from './tool-call-stream-guard.js'
 
 /**
  * 部署 persona（system prompt 的 order-0 段）。
@@ -308,9 +308,10 @@ export function installStderrLog(ctx: Context): void {
 export async function boot(env: NodeJS.ProcessEnv, onClosed?: () => void): Promise<Context> {
   const ctx = new Context()
   installStderrLog(ctx)
-  // 必须在第一个 LLM 请求前装好（见模块头注释：flash 经部分上游路径的
-  // 分片用显式 null 重复工具调用头，适配器的 `!== void 0` 守卫会被
-  // null 穿透，首片捕获的 id/name 被逐片覆盖成 null → 空名派发）。
+  // 必须在第一个 LLM 请求前装好（见模块头注释：部分上游路径的分片用显式 null
+  // 或空串重复工具调用头，适配器的 `!== void 0` 守卫对两者都不设防，首片捕获的
+  // id/name 被逐片覆盖 → 空名派发）。不卸载：一个客户端连接就是一个进程，壳
+  // 随进程一起走。
   installToolCallStreamGuard()
   await composeAgent(ctx, { sessionsRoot: sessionsRoot(env) })
   // watch 关掉：agent 是「一个客户端连接 = 一个进程」的短命子进程，热重载没有
