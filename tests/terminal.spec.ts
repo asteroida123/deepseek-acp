@@ -28,6 +28,7 @@ interface RawUpdate {
   kind?: string
   status?: string
   content?: unknown[]
+  rawInput?: unknown
   _meta?: {
     terminal_info?: { terminal_id: string; cwd?: string }
     terminal_output?: { terminal_id: string; data: string }
@@ -92,6 +93,8 @@ describe('TC-TERM-01 支持终端的客户端拿到终端卡片', () => {
       { type: 'terminal', terminalId: 'term-1' },
     ])
     expect(call._meta?.terminal_info).toEqual({ terminal_id: 'term-1', cwd })
+    // 入参对象与表头同源：cwd 两处必须是同一个值
+    expect(call.rawInput).toEqual({ command: 'echo hello-terminal', description: '打个招呼', cwd })
     h.disposeBridge()
   }, 30_000)
 
@@ -132,16 +135,19 @@ describe('TC-TERM-02 非零退出', () => {
 describe('TC-TERM-03 不支持终端的客户端', () => {
   it('退回围栏 console 文本，且完全不发 _meta', async () => {
     const h = await createHarness({ shell: 'local' })
+    const cwd = realTempDir()
     const { call, result } = await runCommand(h, {
       command: 'echo plain-fallback',
       description: '打个招呼',
-      cwd: realTempDir(),
+      cwd,
       terminal: false,
     })
 
     // 调用侧只剩描述，没有 terminal 内容块
     expect(call).not.toHaveProperty('_meta')
     expect(call.content).toEqual([{ type: 'content', content: { type: 'text', text: '打个招呼' } }])
+    // 这条路径上没有 `terminal_info` 表头，工作目录只能从入参对象里读
+    expect(call.rawInput).toEqual({ command: 'echo plain-fallback', description: '打个招呼', cwd })
 
     expect(result).not.toHaveProperty('_meta')
     const text = (result.content?.[0] as { content?: { text?: string } })?.content?.text ?? ''

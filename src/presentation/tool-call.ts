@@ -13,7 +13,7 @@ import type { CallId } from '@deepseek-ai/dsh-llm'
 import type { FileLocation, ToolCallView, ToolResultView } from '@deepseek-ai/dsh-tools'
 import { toolResultContent } from '../codec/content.js'
 import { displayTitle, relativizeLocations } from './paths.js'
-import { terminalCallMeta, terminalExitMeta, terminalFallbackContent } from './terminal.js'
+import { terminalCallMeta, terminalCwd, terminalExitMeta, terminalFallbackContent } from './terminal.js'
 
 /**
  * `session/update` 里 tool_call / tool_call_update 两个分支。
@@ -86,13 +86,26 @@ export function toolCallUpdate(
       ...description,
       ...(terminal.enabled ? [{ type: 'terminal' as const, terminalId: callId }] : []),
     ]
+    // `_meta.terminal_info` 的 cwd 表头同源：客户端不管从哪一侧读，看到的工作
+    // 目录都是同一个。
+    const cwd = terminalCwd(view.cwd, terminal.cwd)
     return {
       sessionUpdate: 'tool_call',
       toolCallId: callId,
       title: view.title,
       kind: 'execute',
       status: 'in_progress',
-      rawInput: view.title,
+      // **参数对象，不是命令字符串。** ACP 给这个字段的语义就是「发给工具的入
+      // 参」，两个参考适配器也都发对象（codex-acp 是 `{command, cwd}`，
+      // claude-agent-acp 直接发整个入参对象），客户端的通用启发式照着这个形状
+      // 写。发裸字符串的代价落在没有终端能力的客户端上：cwd 只在 `_meta` 里，
+      // 而 `_meta` 那一侧此刻根本不发；描述虽有 content 块，但结果侧的 content
+      // 会把调用侧的整个集合替换掉。两者都只剩这里一条出路。
+      rawInput: {
+        command: view.title,
+        ...(view.description !== undefined ? { description: view.description } : {}),
+        ...(cwd !== undefined ? { cwd } : {}),
+      },
       ...(content.length > 0 ? { content } : {}),
       ...terminalCallMeta(callId, view.cwd, terminal),
     }

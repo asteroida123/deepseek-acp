@@ -189,6 +189,23 @@ describe('TC-MAP-03 终端卡片（US-10）', () => {
     expect(update.content).toEqual([{ type: 'content', content: { type: 'text', text: '列目录' } }])
   })
 
+  it('rawInput 是参数对象：命令 + 描述 + 解析后的 cwd，与 terminal_info 表头同源', () => {
+    const update = toolCallUpdate(CID, call, withTerminal)
+    expect(update.rawInput).toEqual({ command: 'ls -la', description: '列目录', cwd: '/work/repo/src' })
+  })
+
+  it('没有终端能力时 rawInput 照发 —— 那时 cwd 没有别的出路', () => {
+    // 正是这条路径上的客户端最需要它：`_meta` 一个字节都不发，工作目录只剩这里。
+    const update = toolCallUpdate(CID, call, { enabled: false, cwd: WS })
+    expect(update).not.toHaveProperty('_meta')
+    expect(update.rawInput).toEqual({ command: 'ls -la', description: '列目录', cwd: '/work/repo/src' })
+  })
+
+  it('描述与 cwd 都缺席时不塞空键 —— 客户端会把它们当成「有但为空」', () => {
+    const bare: ToolCallView = { card: 'terminal', title: 'pwd' }
+    expect(toolCallUpdate(CID, bare, NO_TERMINAL).rawInput).toEqual({ command: 'pwd' })
+  })
+
   it('结果侧走 _meta 且**不带 content** —— content 会整体替换掉终端块', () => {
     const view: ToolResultView = { card: 'terminal', output: 'a\nb', exitCode: 0 }
     const update = toolResultUpdate(CID, view, false, withTerminal)
