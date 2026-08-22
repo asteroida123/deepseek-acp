@@ -26,6 +26,8 @@ import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import UserQuestions from '@deepseek-ai/dsh-user-questions'
 import * as AskUserTool from '@deepseek-ai/dsh-tool-ask-user'
 import LlmService from '@deepseek-ai/dsh-llm'
+import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
+import FileSettings from '@deepseek-ai/dsh-settings-file'
 import LocalSandbox from '@deepseek-ai/dsh-sandbox-local'
 import SandboxPolicy from '@deepseek-ai/dsh-sandbox-policy'
 import SessionService from '@deepseek-ai/dsh-session'
@@ -51,8 +53,9 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk'
+import { ensurePiAi } from '../src/composition/pi-ai.js'
 import * as bridge from '../src/index.js'
-import { FAKE_MODEL, FAKE_PROVIDER, FakeLlmAdapter } from './fake-llm.js'
+import { FAKE_MODEL, FAKE_PROVIDER, FAKE_PROVIDER_ALT, FakeLlmAdapter } from './fake-llm.js'
 
 /** 客户端侧收到的更新，按到达顺序。 */
 export interface CapturedUpdate {
@@ -111,6 +114,8 @@ export interface TestHarness {
   logs: CapturedLog[]
   /** 可编排的假模型 */
   llm: FakeLlmAdapter
+  /** 第二条 provider 路由的适配器；没开 `altProvider` 时 undefined */
+  llmAlt: FakeLlmAdapter | undefined
   /** 客户端收到的授权请求，按到达顺序 */
   permissionRequests: RequestPermissionRequest[]
   /** 客户端收到的表单征询，按到达顺序 */
@@ -271,6 +276,23 @@ export async function createHarness(
      * 无法被忘记。项目级的根仍由会话 cwd 决定。
      */
     skills?: string
+    /**
+     * 再注册**第二个 provider 路由**（{@link FAKE_PROVIDER_ALT}），由 `h.llmAlt`
+     * 暴露它自己的适配器。
+     *
+     * 单适配器测不到跨 provider 的东西：模型下拉只有在候选跨了 provider 时才
+     * 变成分组形状、取值才带前缀，而「切到别家的模型」是否真的换了路由，也只有
+     * 在有第二家时才问得出来。
+     */
+    altProvider?: boolean
+    /**
+     * 挂设置服务与本地凭据，两者都**关进这个目录**（`<它>/settings.yaml`、
+     * `<它>/.credentials.yaml`）。
+     *
+     * 给路径而不是布尔，与 `skills` 同样的理由，而且更硬：这条链会**写盘**，
+     * 一个忘了隔离的用例会去改本机真正的 `~/.dsh/.credentials.yaml`。
+     */
+    settings?: string
   } = {},
 ): Promise<TestHarness> {
   const ctx = new Context()
@@ -374,9 +396,29 @@ export async function createHarness(
     'dsh services',
   )
 
+  // provider 配置面（`providers/*`）需要一个**可写**的设置服务与凭据服务。两者
+  // 都指向用例给的隔离目录：这条链真的写盘。
+  if (options.settings !== undefined) {
+    await ctx.plugin(FileSettings, {
+      path: join(options.settings, 'settings.yaml'),
+      // watch 关掉，理由与 boot.ts 一致：watcher 持有事件循环。用例里还多一层
+      // ——vitest 不会因为一个悬着的 watcher 失败，只会在整轮结束时挂住。
+      watch: false,
+    })
+    await ctx.plugin(LocalCredentials, { dshHome: options.settings, watch: false })
+    // 走与生产同一条幂等入口：`providers/*` 也会调它，两处各挂一次会以
+    // 「路由已注册」失败。
+    await ensurePiAi(ctx)
+  }
+
   // 只伪造模型这一层；回合生命周期走真实 agent loop。
   const llm = new FakeLlmAdapter()
   ctx.llm.registerAdapter([FAKE_PROVIDER], llm)
+  // 第二条路由用**另一个适配器实例**而不是把同一个注册两次：这样
+  // `llmAlt.providersUsed` 非空本身就证明请求进了另一家，不必再去分辨同一份
+  // 记录里的两条路由。
+  const llmAlt = options.altProvider === true ? new FakeLlmAdapter() : undefined
+  if (llmAlt !== undefined) ctx.llm.registerAdapter([FAKE_PROVIDER_ALT], llmAlt)
 
   const { a: agentSide, b: clientSide } = pipePair()
   // `stream` 属于 ApplyOptions（测试传输覆盖），不在 Config schema 里。
@@ -454,6 +496,7 @@ export async function createHarness(
     updates,
     logs,
     llm,
+    llmAlt,
     permissionRequests,
     elicitations,
     fsReads,

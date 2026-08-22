@@ -38,8 +38,17 @@ export interface AgentHandle {
 export interface SessionControls {
   /** 当前模型 id；未设置时 undefined */
   model(): string | undefined
-  /** 切模型；在下一步进入 prompt 装配时生效 */
-  setModel(model: string): void
+  /** 当前 provider 路由；未设置时 undefined */
+  provider(): string | undefined
+  /**
+   * 切路由（provider + model 一起）；在下一步进入 prompt 装配时生效。
+   *
+   * **两者必须同时给**：模型 id 只在它自己的 provider 下有意义，分开设会出现
+   * 「provider 已换、model 还是旧的」这半步状态，而那一步的请求会带着一个新
+   * provider 不认识的模型 id 发出去，表现为换 provider 之后就报 404。上游的
+   * `ModelSelection` 本身也是 `{provider, model}` 一对。
+   */
+  setRoute(provider: string, model: string): void
   /**
    * 当前模型的上下文窗口（token）；未知时 undefined。
    *
@@ -209,6 +218,61 @@ export interface ModePlane {
   set(agent: Agent, active: boolean): void
 }
 
+/** 一个可配置的 provider 路由（ACP `providers/*`）。 */
+export interface ProviderConfig {
+  readonly id: string
+  /** 展示名；目录没给时回落到 id */
+  readonly displayName: string
+  /**
+   * 是否**不可禁用**。
+   *
+   * 静态组合进来的适配器（本项目里是 `llm-deepseek`）为真：它的路由不是从设置
+   * 文档来的，`providers/disable` 删不掉，谎称可删只会让客户端给出一个点了没
+   * 反应的按钮。
+   */
+  readonly required: boolean
+  /**
+   * 当前生效的**非机密**路由配置；未配置时 undefined。
+   *
+   * ACP 把「`current` 缺席」定义为该 provider 处于禁用态，因此这里的 undefined
+   * 是有语义的，不是「读不出来」。
+   */
+  readonly current: { readonly apiType: string; readonly baseUrl: string } | undefined
+}
+
+/**
+ * provider 配置面（ACP `providers/list` / `set` / `disable`）。
+ *
+ * 组合没挂设置服务、或挂了一个只读的，整体为 undefined —— 此时 `initialize`
+ * 不 advertise `providers` 能力位，三个方法也直接拒绝。声明与实现同一个真值来源，
+ * 与 `loadSession` 那几项一样。
+ */
+export interface ProviderPlane {
+  /**
+   * 本部署认得的线协议词表，供客户端画下拉框。
+   *
+   * **异步**：词表归 pi-ai 所有，而那个包 import 一次要 5 秒，因此它是惰性拉起
+   * 的（见 `src/composition/pi-ai.ts`）。第一次问会等，之后是缓存。
+   */
+  protocols(): Promise<readonly string[]>
+  /** 全部可配置 provider（含未激活的），以及各自当前的非机密配置 */
+  list(): Promise<readonly ProviderConfig[]>
+  /**
+   * 写入一条 provider 配置。
+   *
+   * **密钥不落设置文档**：实现从 `headers` 里摘出授权头交给凭据服务，设置文档
+   * 里只留一个引用。见 `src/protocol/providers.ts`。
+   */
+  set(input: {
+    readonly id: string
+    readonly apiType: string
+    readonly baseUrl: string
+    readonly headers: Readonly<Record<string, string>> | undefined
+  }): Promise<void>
+  /** 禁用（= 删掉配置）一条 provider 路由 */
+  disable(id: string): Promise<void>
+}
+
 /** 会话事件订阅。 */
 export interface EventSource {
   /**
@@ -261,6 +325,16 @@ export interface HarnessPort {
   readonly skills: SkillPlane | undefined
   /** 会话模式面；组合没挂 plan-mode 时 undefined */
   readonly modes: ModePlane | undefined
+  /** provider 配置面；组合没挂可写的设置服务时 undefined */
+  readonly providers: ProviderPlane | undefined
+  /**
+   * 当前注册着适配器的全部 provider 路由。
+   *
+   * 只报**活的**路由（`ctx.llm.listProviders()`）：用户在设置文档里配了但
+   * 还没生效的条目不在此列，模型下拉里出现一个选了就 404 的分组毫无意义。
+   * 「可配置但未激活」是 `providers/list` 那条线的事，与这里正交。
+   */
+  listProviders(): readonly { id: string; name: string }[]
   /**
    * 该 provider 下可选的模型。
    *

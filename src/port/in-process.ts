@@ -29,6 +29,14 @@ import type {} from '@deepseek-ai/dsh-plan-mode'
 // 技能注册表同样是可选组合件。这一行**不是**纯类型导入：`isUserInvocable` 是个
 // 读 `invocation.userInvocable` 的纯函数谓词，自己判等于把上游的策略规则抄一遍。
 import { isUserInvocable } from '@deepseek-ai/dsh-skill'
+// provider 配置面（`providers/*`）用得到的两个纯函数构造器：设置服务的命名空间、
+// 凭据引用。两者都不引入服务依赖。
+//
+// 线协议词表**不在这里静态 import**：它归 `dsh-llm-pi-ai` 所有，而那个包 import
+// 一次要 5 秒，静态引用会把这 5 秒加到每一次启动上。改走惰性加载器。
+import { settingsNamespace } from '@deepseek-ai/dsh-settings'
+import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import { ensurePiAi, loadPiAi } from '../composition/pi-ai.js'
 import * as McpClient from '@deepseek-ai/dsh-mcp-client'
 import * as FsTool from '@deepseek-ai/dsh-tool-fs'
 import { mountSessionFs, type ClientTextReader } from '../composition/session-fs.js'
@@ -40,6 +48,7 @@ import type {
   CommandPlane,
   HarnessPort,
   ModePlane,
+  ProviderPlane,
   SessionCatalog,
   SessionControls,
   SessionSummary,
@@ -120,6 +129,54 @@ async function mapWithLimit<T, R>(
   }
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
   return results
+}
+
+/**
+ * 从请求头里摘出授权密钥。
+ *
+ * ACP 的 `providers/set` 把密钥放在 `headers` 里（多半是 `Authorization:
+ * Bearer <key>`），而上游 profile 要的是一个**凭据引用名**。两者之间必须有这一
+ * 步转换，否则密钥会原样写进 `settings.yaml` —— 那个文件是明文的、会被配置界面
+ * 整段读出来、也常常被用户贴进 issue 里。
+ *
+ * 头名大小写不敏感（HTTP 语义），`Bearer` 前缀去掉后再存：存进去的应该是密钥
+ * 本身，让上游决定怎么拼头。
+ * @param headers - 客户端给的完整头表
+ * @returns 密钥；没有授权头时 undefined
+ */
+function authorizationSecret(headers: Readonly<Record<string, string>> | undefined): string | undefined {
+  if (headers === undefined) return undefined
+  for (const [name, value] of Object.entries(headers)) {
+    const lower = name.toLowerCase()
+    if (lower !== 'authorization' && lower !== 'x-api-key' && lower !== 'api-key') continue
+    const trimmed = value.trim()
+    if (trimmed.length === 0) continue
+    return /^bearer\s+/i.test(trimmed) ? trimmed.replace(/^bearer\s+/i, '') : trimmed
+  }
+  return undefined
+}
+
+/**
+ * 某条 provider 路由的凭据引用名。
+ *
+ * 引用名的字符集比路由 key 窄（POSIX 标识符那一档），所以非法字符一律换成下划线
+ * 再大写——`acme-gateway` → `ACME_GATEWAY_API_KEY`，与用户手写配置时的习惯一致。
+ * @param provider - 路由 key
+ */
+function credentialRefFor(provider: string): string {
+  return `${provider.replace(/[^A-Za-z0-9]+/g, '_').toUpperCase()}_API_KEY`
+}
+
+/**
+ * 把一个值包进嵌套路径里，供 `settings.update` 深合并。
+ *
+ * `update` 的语义是 deep-merge 到用户段，因此要改 `providers.acme` 就得交给它一个
+ * `{providers: {acme: {...}}}` 形状的补丁，而不是那条 profile 本身。
+ * @param path - 从段根到目标的路径；空数组表示整段就是目标
+ * @param value - 放在路径末端的值
+ */
+function nest(path: readonly string[], value: unknown): unknown {
+  return path.reduceRight<unknown>((inner, segment) => ({ [segment]: inner }), value)
 }
 
 /**
@@ -273,20 +330,25 @@ export function createInProcessPort(ctx: Context): HarnessPort {
 
     return {
       model: () => selection.current?.model,
+      provider: () => selection.current?.provider,
       contextWindow: windowNow,
       reasoningEffort: () => selection.current?.reasoningEffort,
-      setModel: (model: string) => {
-        const current = selection.current
-        // provider 保持不变：ACP 的模型下拉是**在当前 provider 内**选择，换 provider
-        // 是另一件事（`session/set_provider`，尚未实现）。丢掉 provider 会让下一步
-        // 路由不到任何适配器。
+      setRoute: (provider: string, model: string) => {
+        // **不再保留原 provider**：模型下拉现在是跨 provider 的分组列表，一次
+        // 选择同时定下走哪条路由与用哪个模型。上游的 `installModelSelection`
+        // 把整个 `{provider, model}` 对应用到请求上，换 provider 本就是合法的。
+        //
+        // 仍然要求会话已有选择（`current !== undefined`）才写：没有初始路由的
+        // 会话（建会话时缺 provider/model）连模型配置项都不 advertise，此时收到
+        // 一次设置只可能来自伪造的请求，凭空造一个选择等于替用户做了决定。
         //
         // **推理档位一并清空**：词表随模型变（有的路由只剩 `off`）。留着旧模型
         // 的选择，`LlmRuntime` 会在下一次请求里抛 `UNSUPPORTED_REASONING_EFFORT`
         // ——它校验有效档位在新词表里。也就是说不清空的后果是一次响亮的失败，
         // 不是静默走偏；清空把它变成一次平滑的重置，回到新模型的默认档，这正是
-        // 上游对「未选中档位」的定义。
-        selection.current = current === undefined ? undefined : { provider: current.provider, model }
+        // 上游对「未选中档位」的定义。跨 provider 时这一条更要紧：两个适配器的
+        // 档位词表可以毫无交集。
+        selection.current = selection.current === undefined ? undefined : { provider, model }
         // 换模型同样要热：新模型的窗口没解析过，不热的话切换后第一轮的用量条
         // 会整条消失，看起来像功能坏了。
         windowNow()
@@ -415,13 +477,133 @@ export function createInProcessPort(ctx: Context): HarnessPort {
           },
         }
 
+  // ── provider 配置面（ACP `providers/*`）─────────────────────────────
+  //
+  // 组合没挂设置服务、或挂了个只读的，整面缺席：能力位随之不 advertise。写不了
+  // 却声明可写，客户端会拿到一个点了报错的表单。
+  const settings = ctx.get('settings')
+  const providers: ProviderPlane | undefined =
+    settings === undefined || !settings.writable
+      ? undefined
+      : {
+          async protocols() {
+            // 首次调用把 pi-ai 拉起来（约 5 秒）。这只发生在用户真的打开 provider
+            // 配置界面时，不在启动路径上。
+            return (await loadPiAi()).supportedProtocols()
+          },
+          async list() {
+            // 目录归 pi-ai 所有：没挂它，用户在配置界面里一个可选项都看不到，
+            // 也就无从添加第一条路由。这是「首次打开配置界面付 5 秒」的那一次。
+            await ensurePiAi(ctx)
+            const llm = ctx.get('llm')
+            if (llm === undefined) return []
+            // 目录 = 「可以配的」，活跃路由 = 「现在真的能用的」。两者都要：只报
+            // 目录会漏掉静态组合进来的 `deepseek-official`（它不在目录里），只报
+            // 活跃路由则会让一个尚未配置的 provider 无从被配置。
+            const directory = llm.listConfigurableProviders()
+            const live = new Map(llm.listProviders().map((p) => [p.id, p.name]))
+            // **必须 `redactSecrets`**：上游明写每个线上表面都得传，否则 API Key
+            // 会随描述符原样发给客户端。
+            const described = settings.describe({ redactSecrets: true })
+            const sectionOf = (ns: string): Record<string, unknown> =>
+              (described.find((d) => d.ns === ns)?.value ?? {}) as Record<string, unknown>
+
+            const configured = directory.map((entry) => {
+              // `settingsPath` 是从该 namespace 段根到这条 profile 的路径；空数组
+              // 表示整段就是 profile。
+              let node: unknown = sectionOf(entry.settingsNs)
+              for (const segment of entry.settingsPath) {
+                node = typeof node === 'object' && node !== null
+                  ? (node as Record<string, unknown>)[segment]
+                  : undefined
+              }
+              const profile = typeof node === 'object' && node !== null
+                ? (node as Record<string, unknown>)
+                : undefined
+              return {
+                id: entry.provider,
+                displayName: entry.displayName,
+                required: false,
+                current: profile === undefined
+                  ? undefined
+                  : {
+                      apiType: typeof profile['api'] === 'string' ? profile['api'] : '',
+                      baseUrl: typeof profile['baseURL'] === 'string' ? profile['baseURL'] : '',
+                    },
+              }
+            })
+
+            // 活跃但不在目录里的路由 —— 静态组合的适配器就是这一类。它们的配置
+            // 不在设置文档里，因此 `required`，也报不出 apiType/baseUrl。
+            const known = new Set(configured.map((p) => p.id))
+            const staticRoutes = [...live.entries()]
+              .filter(([id]) => !known.has(id))
+              .map(([id, name]) => ({ id, displayName: name, required: true, current: undefined }))
+
+            return [...staticRoutes, ...configured]
+          },
+          async set(input) {
+            await ensurePiAi(ctx)
+            const llm = ctx.get('llm')
+            const entry = llm?.listConfigurableProviders().find((e) => e.provider === input.id)
+            if (entry === undefined) {
+              throw new Error(`provider "${input.id}" is not configurable`)
+            }
+            const path = [...entry.settingsPath]
+            const profile: Record<string, unknown> = {
+              api: input.apiType,
+              baseURL: input.baseUrl,
+            }
+            // 密钥单独走凭据服务，设置文档里只留引用名。`apiKeyEnv` 在上游本就是
+            // 一个**引用**而非明文，所以这不是我们发明的约定，是照它的语义用。
+            const secret = authorizationSecret(input.headers)
+            if (secret !== undefined) {
+              const credentials = ctx.get('credentials')
+              if (credentials === undefined) {
+                throw new Error('cannot store a provider credential: no credential provider is composed')
+              }
+              const ref = credentialRefFor(input.id)
+              await credentials.set(credentialRef(ref), secret)
+              profile['apiKeyEnv'] = ref
+            }
+            // `update` 是**深合并**进用户段，因此不会碰同段里别的 provider，也不会
+            // 碰这条 profile 上我们没提到的字段（models、retryPolicy…）。
+            await settings.update(
+              settingsNamespace(entry.settingsNs),
+              nest(path, profile) as never,
+            )
+          },
+          async disable(id) {
+            await ensurePiAi(ctx)
+            const llm = ctx.get('llm')
+            const entry = llm?.listConfigurableProviders().find((e) => e.provider === id)
+            if (entry === undefined) {
+              throw new Error(`provider "${id}" is not configurable`)
+            }
+            // **`mutate` 的 unset 而不是 `replace`**：我们手上只有一份脱敏视图，
+            // 用它重建整段再整体写回，会把线上从未返回过的每一个密钥一并删掉
+            // ——包括同段里其它 provider 的。op 只点名它要删的那一条。
+            await settings.mutate(settingsNamespace(entry.settingsNs), [
+              { op: 'unset', path: [...entry.settingsPath] },
+            ])
+          },
+        }
+
   return {
     tools,
     catalog,
     commands,
     skills,
+    providers,
     modes,
     sandboxModes: ctx.get('sandboxPolicy') === undefined ? [] : SANDBOX_MODES,
+    listProviders() {
+      const llm = ctx.get('llm')
+      if (llm === undefined) return []
+      // **同步**，与 `listModels` 不同：路由表是注册表里的内存结构，`listProviders()`
+      // 只是把它拷一份出来；而列模型要问适配器（可能是一次网络往返）。
+      return llm.listProviders().map((p) => ({ id: p.id, name: p.name }))
+    },
     async listModels(provider: string) {
       const llm = ctx.get('llm')
       if (llm === undefined) return []

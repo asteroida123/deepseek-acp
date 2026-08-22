@@ -1,0 +1,97 @@
+/**
+ * `@deepseek-ai/dsh-llm-pi-ai` 的**惰性**加载。
+ *
+ * ## 为什么要惰性
+ *
+ * 这个包 `import` 一次要 **4.9 秒**（对照：`dsh-llm-deepseek` 0.24 秒）——它在模块
+ * 求值期把 `@earendil-works/pi-ai` 的整张 provider 目录拉起来。静态 import 会把这
+ * 5 秒加到**每一次**编辑器启动上，而绝大多数部署根本没配第二条 provider 路由，
+ * 等于为一个用不上的能力永久付费。实测：加进组合后 `initialize` 的首次应答从
+ * ~3s 涨到 ~4-10s。
+ *
+ * 所以它只在两种时刻被拉起来：
+ *
+ * 1. **启动时**，设置文档里确实写了 `llm-pi-ai` 段 —— 那说明用户配了路由，模型
+ *    要走它，不加载就等于配置不生效。
+ * 2. **首次 `providers/*` 调用时** —— 用户打开了 provider 配置界面，这是一次明确
+ *    的交互，等一下是可以接受的；而它不发生在启动路径上。
+ *
+ * ## 那个预筛为什么可以是子串匹配
+ *
+ * 判据「设置文档里有没有 `llm-pi-ai`」故意做得很粗：**猜错的代价是不对称的**。
+ * 误判为「有」只是白付一次加载（行为完全正确，只是慢）；误判为「无」才会让用户
+ * 配好的路由静默失效。子串匹配不会漏——YAML 的段名就是这个字面量——只可能多。
+ * @module
+ */
+
+import { readFile } from 'node:fs/promises'
+import type { Context } from '@deepseek-ai/cordis'
+
+/** pi-ai 插件模块的类型；只用到命名空间插件契约与协议词表。 */
+type PiAiModule = typeof import('@deepseek-ai/dsh-llm-pi-ai')
+
+/**
+ * 进程级单例。
+ *
+ * 存的是 **promise 而不是模块**：两处并发触发（启动预筛与首次 `providers/list`）
+ * 时，第二个等在同一个 promise 上，而不是各拉一次 5 秒的模块。
+ */
+let pending: Promise<PiAiModule> | undefined
+
+/**
+ * 拉起 pi-ai 模块，进程内只做一次。
+ * @returns 模块命名空间
+ */
+export async function loadPiAi(): Promise<PiAiModule> {
+  pending ??= import('@deepseek-ai/dsh-llm-pi-ai')
+  return pending
+}
+
+/** pi-ai 在设置服务里的命名空间；目录条目靠它辨认。 */
+const PI_AI_NS = 'llm-pi-ai'
+
+/**
+ * 确保 pi-ai 已挂进这个 context，**幂等**。
+ *
+ * `providers/*` 要的不只是模块，而是它注册进 `ctx.llm` 的**可配置 provider 目录**
+ * ——没挂插件，目录就是空的，用户在配置界面里一个可选项都看不到，也就无从添加
+ * 第一条路由。而重复挂载会以 `configurable provider "amazon-bedrock" is already
+ * declared` 失败，所以这里必须幂等。
+ *
+ * ## 为什么查状态而不是记一个标志
+ *
+ * 一开始这里用 `WeakSet` 按 context 记「挂过了」，**是错的**：启动路径传的是根
+ * context，而 `providers/*` 那条路径传的是 bridge 插件自己的子 context，两个是
+ * 不同的对象，于是标志查不中、插件被挂第二次。查注册表的真实状态没有这个问题
+ * ——不管谁在什么作用域挂的，目录是同一份。
+ *
+ * pi-ai 即便**休眠挂载**（零路由）也会把整张内置目录声明进可配置 provider 目录
+ * （上游 README 明说），所以「目录里有 `llm-pi-ai` 段的条目」与「插件已挂」是
+ * 等价的，不会出现挂了却查不到的空窗。
+ * @param ctx - 任意 context；只要能看到同一个 `ctx.llm` 即可
+ */
+export async function ensurePiAi(ctx: Context): Promise<void> {
+  const llm = ctx.get('llm')
+  if (llm === undefined) return
+  if (llm.listConfigurableProviders().some((entry) => entry.settingsNs === PI_AI_NS)) return
+  // 命名空间插件：模块命名空间本身就是插件。`providers` 留空 → 休眠挂载，
+  // 路由完全由 `llm-pi-ai:` 设置段决定。
+  await ctx.plugin(await loadPiAi(), {})
+}
+
+/**
+ * 设置文档里是否提到了 pi-ai。
+ *
+ * 读不到文件（还没配置过）就是「没提到」：那正是绝大多数部署的状态，也正是这个
+ * 优化要照顾的那一档。
+ * @param documentPath - 设置文档路径；provider 没有文件后端时 undefined
+ * @returns 需要在启动时就加载则 true
+ */
+export async function settingsMentionsPiAi(documentPath: string | undefined): Promise<boolean> {
+  if (documentPath === undefined) return false
+  try {
+    return (await readFile(documentPath, 'utf8')).includes('llm-pi-ai')
+  } catch {
+    return false
+  }
+}

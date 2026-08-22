@@ -42,6 +42,11 @@ import {
 import { handleListSessions } from './protocol/session-list.js'
 import { handleLoadSession } from './protocol/session-load.js'
 import { refreshCommands } from './protocol/session-commands.js'
+import {
+  handleDisableProvider,
+  handleListProviders,
+  handleSetProvider,
+} from './protocol/providers.js'
 import { handleSetConfigOption } from './protocol/session-config.js'
 import { handleSetMode } from './protocol/session-mode.js'
 import { handleNewSession } from './protocol/session-new.js'
@@ -277,6 +282,8 @@ export function apply(ctx: Context, config: AcpBridgeConfig & ApplyOptions = {})
       logger?.info?.(`client ${describeClient(params)}`)
       return handleInitialize({
         persistent: port.catalog !== undefined,
+        // 与 `persistent` 同构：能力位跟着组合走，不跟着愿望走。
+        providers: port.providers !== undefined,
         // 终端登录是 opt-in 的方法类型：只发给声明认得它的客户端，其余照旧拿空
         // 数组。**必须读 `params`**——这是本 handler 里唯一一处「应答内容取决于
         // 请求」的地方，漏掉的表现不是报错，是老客户端收到一个没准备好的变体。
@@ -298,6 +305,9 @@ export function apply(ctx: Context, config: AcpBridgeConfig & ApplyOptions = {})
     .onRequest('session/list', ({ params }) => handleListSessions(bridge, params))
     .onRequest('session/close', ({ params }) => handleCloseSession(bridge, params))
     .onRequest('session/resume', ({ params }) => handleResumeSession(bridge, params))
+    .onRequest('providers/list', ({ params }) => handleListProviders(bridge, params))
+    .onRequest('providers/set', ({ params }) => handleSetProvider(bridge, params))
+    .onRequest('providers/disable', ({ params }) => handleDisableProvider(bridge, params))
     .onRequest('session/set_config_option', ({ params }) => handleSetConfigOption(bridge, params))
     .onRequest('session/set_mode', ({ params }) => handleSetMode(bridge, params))
     .onRequest('session/prompt', ({ params }) => handlePrompt(bridge, params))

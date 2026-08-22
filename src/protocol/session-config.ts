@@ -11,7 +11,14 @@ import type {
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Bridge } from '../bridge.js'
 import { invalidParams } from '../codec/errors.js'
-import { MODEL_OPTION, REASONING_OPTION, SANDBOX_OPTION, configOptions } from '../config/options.js'
+import type { RouteChoice } from '../config/options.js'
+import {
+  MODEL_OPTION,
+  REASONING_OPTION,
+  SANDBOX_OPTION,
+  configOptions,
+  decodeRouteValue,
+} from '../config/options.js'
 import type { SessionRecord } from '../session/table.js'
 
 /**
@@ -23,18 +30,42 @@ import type { SessionRecord } from '../session/table.js'
  * @param record - 会话记录
  * @returns 配置项数组
  */
+export async function routesFor(bridge: Bridge): Promise<RouteChoice[]> {
+  // 列的是**当前活着的**全部 provider，而不是建会话时那一个：模型下拉现在跨
+  // provider，用户配了第二条路由就该在同一个框里看到它。
+  //
+  // 各 provider **并发**列模型：列目录可能是一次网络往返，串行会让 N 个 provider
+  // 各等一遍。单个 provider 取不到目录时 `listModels` 自己回空数组（不抛），于是
+  // 一条坏路由只会让它自己从下拉框里消失，不会带塌整份配置项。
+  const providers = bridge.port.listProviders()
+  const perProvider = await Promise.all(
+    providers.map(async (provider) => {
+      const models = await bridge.port.listModels(provider.id)
+      return models.map((model) => ({
+        provider: provider.id,
+        providerName: provider.name,
+        model: model.id,
+        modelName: model.name,
+      }))
+    }),
+  )
+  return perProvider.flat()
+}
+
 export async function optionsFor(bridge: Bridge, record: SessionRecord): Promise<SessionConfigOption[]> {
-  const provider = bridge.config.provider
+  // 档位词表按会话**当前**路由查，而不是部署的初始 provider —— 换过 provider 之后
+  // 两者会分叉，用旧的会给出一份别人的词表。
+  const provider = record.handle.controls.provider() ?? bridge.config.provider
   const model = record.handle.controls.model()
-  // 档位词表按**当前**模型查。切模型的应答走的也是这个函数，所以列表在同一次
-  // 往返里就换成新模型的了——不需要另开一条 `config_option_update` 推送。
+  // 切模型的应答走的也是这个函数，所以列表在同一次往返里就换成新模型的了
+  // ——不需要另开一条 `config_option_update` 推送。
   const reasoning =
     provider === undefined || model === undefined
       ? undefined
       : await bridge.port.reasoningEfforts(provider, model)
   return configOptions({
     controls: record.handle.controls,
-    models: provider === undefined ? [] : await bridge.port.listModels(provider),
+    routes: await routesFor(bridge),
     sandboxModes: bridge.port.sandboxModes,
     ...(reasoning === undefined ? {} : { reasoning }),
   })
@@ -70,9 +101,18 @@ export async function handleSetConfigOption(
   }
 
   switch (params.configId) {
-    case MODEL_OPTION:
-      record.handle.controls.setModel(value)
+    case MODEL_OPTION: {
+      // 取值可能是裸模型 id（单 provider）也可能带 provider 前缀（多 provider），
+      // 由 `decodeRouteValue` 按同一份路由表还原成一对。上面那道词表校验已经保证
+      // 它在候选里，所以解不出来只可能是路由表在这两步之间变了（用户刚好在这一
+      // 瞬间改了 settings）——那种情况拒绝掉，好过按半个路由发请求。
+      const route = decodeRouteValue(value, await routesFor(bridge))
+      if (route === undefined) {
+        throw invalidParams(`config option "${params.configId}" has no value "${value}"`)
+      }
+      record.handle.controls.setRoute(route.provider, route.model)
       break
+    }
     case REASONING_OPTION:
       record.handle.controls.setReasoningEffort(value)
       break

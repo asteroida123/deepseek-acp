@@ -46,7 +46,8 @@ function current(o: SessionConfigOption | undefined): string | undefined {
 function stubControls(over: Partial<SessionControls> = {}): SessionControls {
   return {
     model: () => FAKE_MODEL,
-    setModel: () => {},
+    provider: () => 'p',
+    setRoute: () => {},
     contextWindow: () => undefined,
     reasoningEffort: () => undefined,
     setReasoningEffort: () => {},
@@ -65,7 +66,7 @@ describe('TC-REASON-01 档位项的组装', () => {
   it('多档时 advertise，当前值取会话选择', () => {
     const options = configOptions({
       controls: stubControls({ reasoningEffort: () => 'max' }),
-      models: [],
+      routes: [],
       sandboxModes: [],
       reasoning: THREE,
     })
@@ -77,14 +78,14 @@ describe('TC-REASON-01 档位项的组装', () => {
   })
 
   it('会话没选过时落到适配器默认档', () => {
-    const options = configOptions({ controls: stubControls(), models: [], sandboxModes: [], reasoning: THREE })
+    const options = configOptions({ controls: stubControls(), routes: [], sandboxModes: [], reasoning: THREE })
     expect(current(option(options, REASONING_OPTION))).toBe('high')
   })
 
   it('只有一个候选时不 advertise —— 选不动的下拉框没有意义', () => {
     const options = configOptions({
       controls: stubControls(),
-      models: [],
+      routes: [],
       sandboxModes: [],
       reasoning: { efforts: [{ id: 'off', name: 'OFF' }], defaultEffort: 'off' },
     })
@@ -92,7 +93,7 @@ describe('TC-REASON-01 档位项的组装', () => {
   })
 
   it('路由不暴露推理时不 advertise', () => {
-    const options = configOptions({ controls: stubControls(), models: [], sandboxModes: [] })
+    const options = configOptions({ controls: stubControls(), routes: [], sandboxModes: [] })
     expect(option(options, REASONING_OPTION)).toBeUndefined()
   })
 
@@ -101,7 +102,7 @@ describe('TC-REASON-01 档位项的组装', () => {
     // 选择还在）也宁可不显示，也不要显示一个客户端高亮不了的当前值。
     const options = configOptions({
       controls: stubControls({ reasoningEffort: () => 'max' }),
-      models: [],
+      routes: [],
       sandboxModes: [],
       reasoning: { efforts: [{ id: 'off', name: 'OFF' }, { id: 'high', name: 'HIGH' }], defaultEffort: 'off' },
     })
@@ -111,7 +112,7 @@ describe('TC-REASON-01 档位项的组装', () => {
   it('认不得的档位 id 原样透传 —— 上游加档位不该让它消失', () => {
     const options = configOptions({
       controls: stubControls(),
-      models: [],
+      routes: [],
       sandboxModes: [],
       reasoning: {
         efforts: [{ id: 'off', name: 'OFF' }, { id: 'turbo', name: 'Turbo', description: '未来档位' }],

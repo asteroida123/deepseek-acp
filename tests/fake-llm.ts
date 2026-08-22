@@ -18,6 +18,15 @@ export const FAKE_PROVIDER = 'fake'
 export const FAKE_MODEL = 'fake-model'
 
 /**
+ * 第二条 provider 路由。
+ *
+ * 名字**刻意以 `fake` 为前缀**：`decodeRouteValue` 按 provider 前缀最长匹配还原
+ * 取值，两个 provider 一个是另一个的前缀正是那段逻辑唯一会出错的形状。用一个
+ * 不相干的名字（`other`）会让这条路径在用例里空过。
+ */
+export const FAKE_PROVIDER_ALT = 'fake-alt'
+
+/**
  * 第二个可选模型。
  *
  * 模型配置项只在候选**多于一个**时 advertise（选不动的下拉框没有意义），
@@ -78,6 +87,14 @@ export class FakeLlmAdapter extends LlmAdapter {
   /** 每次 stream 调用实际收到的模型，按顺序；用于验证切换真的改了路由。 */
   modelsUsed: string[] = []
 
+  /**
+   * 每次 stream 调用实际收到的 provider，按顺序。
+   *
+   * 与 {@link modelsUsed} 分开记：跨 provider 切换时**只看模型看不出问题**
+   * ——两个 provider 各有一个同名模型时，路由错了而模型名对得上，用例会空过。
+   */
+  providersUsed: string[] = []
+
   override async listModels(provider: string) {
     return [
       { provider, id: FAKE_MODEL, name: FAKE_MODEL },
@@ -126,6 +143,7 @@ export class FakeLlmAdapter extends LlmAdapter {
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.calls += 1
     this.modelsUsed.push(options.model)
+    this.providersUsed.push(options.provider)
     this.effortsUsed.push(options.reasoningEffort === undefined ? undefined : String(options.reasoningEffort))
     if (this.failWith !== undefined) throw this.failWith
 

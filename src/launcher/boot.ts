@@ -25,6 +25,7 @@ import SessionService from '@deepseek-ai/dsh-session'
 import JsonlPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SessionProjections from '@deepseek-ai/dsh-session-projection'
 import SessionTitle from '@deepseek-ai/dsh-session-title'
+import FileSettings from '@deepseek-ai/dsh-settings-file'
 import * as ShellEnv from '@deepseek-ai/dsh-shell-env'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
 import * as SkillFilesystem from '@deepseek-ai/dsh-skill-filesystem'
@@ -39,6 +40,7 @@ import * as TodoTool from '@deepseek-ai/dsh-tool-todo'
 import ToolRegistry from '@deepseek-ai/dsh-tools'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import UserQuestions from '@deepseek-ai/dsh-user-questions'
+import { ensurePiAi, settingsMentionsPiAi } from '../composition/pi-ai.js'
 import * as acpBridge from '../index.js'
 import { installToolCallStreamGuard } from './tool-call-stream-guard.js'
 
@@ -325,6 +327,32 @@ export async function boot(env: NodeJS.ProcessEnv, onClosed?: () => void): Promi
   // 明文，而不是一条要读两个包才推得出来的默认值链——这个默认值直接决定每次
   // 请求的延迟与 token 开销，不该藏着。
   await ctx.plugin(LlmDeepSeek, { reasoningEffort: 'high' })
+  // ── 用户设置文档：多 provider 的配置面 ────────────────────────────────
+  //
+  // 挂**具体 provider**（`settings-file`）而不是 `dsh-settings` —— 后者导出的
+  // `SettingsProvider` 是抽象基类（Service Definition），两个都挂会以「服务已
+  // 注册」失败。与 subprocess 那对是同一个坑，理由也同构。
+  //
+  // **`watch: false`**，与上面 `LocalCredentials` 同理且更要紧：fs watcher 会
+  // 一直持有事件循环，让进程在 stdin 关闭后不退出，也就是编辑器场景下的孤儿
+  // 进程。TC-GUARD-02 守着这条。代价是改完 `settings.yaml` 要重开会话才生效，
+  // 而「一个客户端连接 = 一个进程」本来就让热重载没有收益。
+  await ctx.plugin(FileSettings, { watch: false })
+  // 通用多 provider 适配器：openai / anthropic / azure / vertex / bedrock 走
+  // pi-ai 的内置目录，此外还能整条手工声明一个 OpenAI 兼容网关或自建服务。
+  //
+  // 与 `llm-deepseek` **并存**：`deepseek-official` 那条路由仍归后者（它有
+  // DeepSeek 专属的 Files API 图片上传与 vision 模型），pi-ai 只服务用户自己
+  // 配出来的路由。两者注册的路由 key 撞车时 `registerAdapter` 会 fail loud，
+  // 不会静默顶掉。
+  //
+  // **只在设置文档真的提到它时才加载**：这个包 import 一次要 5 秒，静态挂进来
+  // 会把这 5 秒加到每一次编辑器启动上（实测首次应答 ~3s → ~4-10s）。没配路由的
+  // 部署什么都不损失——`providers/*` 那条线会在用户真的去配的时候现拉。
+  // 理由与判据见 `src/composition/pi-ai.ts`。
+  if (await settingsMentionsPiAi(ctx.settings.documentPath)) {
+    await ensurePiAi(ctx)
+  }
   await ctx.plugin(acpBridge, { ...readEnv(env), onClosed } as never)
   return ctx
 }

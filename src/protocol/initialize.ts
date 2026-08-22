@@ -172,7 +172,7 @@ export function describeClient(params: InitializeRequest): string {
  * @returns 本 bridge 的 initialize 应答
  */
 export function handleInitialize(
-  options: { persistent: boolean; terminalAuth?: boolean } = { persistent: false },
+  options: { persistent: boolean; terminalAuth?: boolean; providers?: boolean } = { persistent: false },
 ): InitializeResponse {
   return {
     // 单版本 agent：规范里「支持则同版本，否则取最新支持版本」两条分支
@@ -199,6 +199,9 @@ export function handleInitialize(
         close: {},
         ...(options.persistent ? { list: {}, resume: {} } : {}),
       },
+      // `providers/*` 同样**按组合动态声明**：组合没挂可写的设置服务时整个 plane
+      // 缺席，三个方法会拒绝，此时声明它等于让客户端画一个必然报错的配置表单。
+      ...(options.providers === true ? { providers: {} } : {}),
       ...(options.persistent ? { loadSession: true } : {}),
     },
     // 声明了它**不等于**会拦住建会话：本 bridge 从不返回 `auth_required`，缺 Key
