@@ -67,6 +67,14 @@ DeepSeek Harness 自带一个 ACP server（`@deepseek-ai/dsh-acp`），但它的
 **内置工具**：`bash`、`read`、`write`、`edit`、`glob`、`grep`、`todo_write`、
 `ask_user_question`、`exit_plan_mode`，以及**按机器现有情况**决定的 `lsp`（见下）。
 
+**上下文压缩。** 长会话撞到窗口上限时自动把较早的一段总结成一条替换消息，而不是让下一次
+请求以「上下文超限」失败；也可以手动敲 `/compact`。声明了 `session.compaction` 的客户端会
+收到 `compaction_update` / `compaction_summary_chunk`，能看到压了哪一段、摘要是什么；没声明的
+客户端照常压缩，只是看不到进度。
+
+**死循环护栏。** 模型连续用同样的参数调同一个工具时注入一条升级提示。不进工具表、不否决
+调用、不改写入参——决定权仍在模型手里，合法的重复调用不受任何影响。
+
 **图片输入。** 贴图或拖图进来即可，文本与图片**按线序**进模型（「改之前 [图] 改之后 [图]」
 不会被拍成「改之前改之后 [图][图]」）。字节落进 `$DSH_HOME/attachments/` 的内容寻址库，
 会话日志里只留引用——base64 直接写进日志会让一条日志涨到几十 MB，而每次恢复都要整份读回来。

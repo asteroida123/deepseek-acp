@@ -76,6 +76,23 @@ export function clientSupportsElicitation(params: InitializeRequest): boolean {
 }
 
 /**
+ * 客户端是否支持按 id upsert 的压缩更新。
+ *
+ * 这一条**没有对应的 agent 能力位**——压缩在 ACP 里完全是客户端侧的显示能力，
+ * 规范对 agent 的要求是一句 MUST：「Agents MUST only send this update when the
+ * Client advertised `ClientSessionCapabilities::compaction`」。所以这里读到的
+ * 结果直接决定发不发那两条更新，而不是决定 agent 声明什么。
+ *
+ * 与 elicitation 同样的「给了对象就是支持」语义：`{}` 支持，omit 与 null 不支持。
+ * @param params - initialize 请求
+ * @returns 支持压缩更新则 true
+ */
+export function clientSupportsCompaction(params: InitializeRequest): boolean {
+  const compaction = params.clientCapabilities?.session?.compaction
+  return compaction !== undefined && compaction !== null
+}
+
+/**
  * 客户端是否实现 `fs/read_text_file`（US-25）。
  *
  * 这一位是**布尔**而非对象，所以判定与 elicitation 那条不同：`=== true` 才算。

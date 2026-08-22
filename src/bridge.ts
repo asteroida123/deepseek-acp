@@ -34,6 +34,14 @@ export interface Bridge {
   /** 客户端是否支持表单式 elicitation（US-21）；同样在 `initialize` 时确定 */
   elicitation: boolean
   /**
+   * 客户端是否支持压缩更新；同样在 `initialize` 时确定。
+   *
+   * 它**只管发不发那两条更新**，不管压不压缩：上下文压缩是模型侧的事，客户端
+   * 认不认得这条协议与「会话该不该被压」无关。不支持的客户端只是看不到进度，
+   * 摘要照常写进会话日志。
+   */
+  compaction: boolean
+  /**
    * 取这个会话的文本读委托（US-25）；客户端没声明 `fs.readTextFile` 时返回
    * `undefined`，会话就全程走磁盘。
    *

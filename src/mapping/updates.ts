@@ -36,6 +36,14 @@ export interface MappingContext {
    * 不给，客户端拿到的是一串没有问题的回答。
    */
   readonly replay?: boolean
+  /**
+   * 客户端是否 advertise 了 `session.compaction`。
+   *
+   * 规范在这里用的是 **MUST**：「Agents MUST only send this update when the
+   * Client advertised `ClientSessionCapabilities::compaction`」。缺省 false ——
+   * 压缩照常发生（它是模型侧的事），只是不往线上发这两条更新。
+   */
+  readonly compaction?: boolean
 }
 
 /**
@@ -92,6 +100,59 @@ export function mapEvent(event: SessionEvent, context: MappingContext = {}): Ses
       // 看起来权威、实际刻度错误的进度条——那比没有进度条更坏。
       if (size === undefined || size <= 0) return []
       return [{ sessionUpdate: 'usage_update', used: contextUsed(usage), size }]
+    }
+
+    // ── 上下文压缩 ────────────────────────────────────────────────────
+    //
+    // 上游把一次压缩记成三条日志事件（`start` 持锁 → `summary` 带摘要 → `end`
+    // 放锁），ACP 那边是一个按 id upsert 的实体加一串摘要分片。对应关系：
+    //
+    //   compaction/start   → compaction_update  status=in_progress
+    //   compaction/summary → compaction_summary_chunk × N（摘要逐块追加）
+    //   compaction/end     → compaction_update  status=completed / failed
+    //
+    // 摘要**只经分片发**，不在 `completed` 里重发一遍：`summary` 字段是补丁语义
+    // （省略即保持不变），分片已经把内容建起来了。而且规范只允许非空 `summary`
+    // 与 `completed` 同行，摘要事件那一刻还没到 `completed`。
+    case 'compaction/start': {
+      if (context.compaction !== true) return []
+      return [
+        {
+          sessionUpdate: 'compaction_update',
+          compactionId: event.data.compactionId,
+          status: 'in_progress',
+        },
+      ]
+    }
+
+    case 'compaction/summary': {
+      if (context.compaction !== true) return []
+      const { compactionId, summary } = event.data
+      // 只发文本块：摘要理论上是任意内容块，但 ACP 的分片一次带一块，而非文本
+      // 块（图片、工具调用）在「这段历史被压成了什么」这件事上没有意义。
+      return summary
+        .filter((block): block is Extract<typeof block, { type: 'text' }> => block.type === 'text')
+        .map((block) => ({
+          sessionUpdate: 'compaction_summary_chunk' as const,
+          compactionId,
+          content: { type: 'text' as const, text: block.text },
+        }))
+    }
+
+    case 'compaction/end': {
+      if (context.compaction !== true) return []
+      const { compactionId, error } = event.data
+      return [
+        {
+          sessionUpdate: 'compaction_update',
+          compactionId,
+          // `error` 在这条事件上就是「这次尝试失败了」的全部证据——上游对失败的
+          // 记录方式是照常 append 一条 `end` 并带上原因，而不是不 append。
+          ...(error === undefined
+            ? { status: 'completed' as const }
+            : { status: 'failed' as const, error }),
+        },
+      ]
     }
 
     case 'tool/call': {

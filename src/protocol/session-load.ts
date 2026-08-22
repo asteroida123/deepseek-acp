@@ -161,6 +161,10 @@ export async function handleLoadSession(
     // 正是最可能接近窗口上限的那种。重放会依次产出历史上每一步的用量，客户端
     // 取到的最后一条就是当前占用。
     contextWindow: record.handle.controls.contextWindow,
+    // 压缩过的会话在重放时要把那几段也标出来，否则转录里会凭空少掉一大截历史
+    // ——被压掉的那些消息不在日志的表面上了，而替换它们的摘要没有 `compaction_*`
+    // 更新就只是一条普通的用户消息。
+    compaction: bridge.compaction,
   })
   // 命令快照跟在历史后面一起发。这里不需要 `session/new` 那套延后：会话 id 是
   // **客户端自己给的**，它早就认识这个会话。

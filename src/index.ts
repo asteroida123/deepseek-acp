@@ -33,6 +33,7 @@ import { handleCloseSession } from './protocol/session-close.js'
 import { handleForkSession } from './protocol/session-fork.js'
 import { handleResumeSession } from './protocol/session-resume.js'
 import {
+  clientSupportsCompaction,
   clientSupportsElicitation,
   clientSupportsFsRead,
   clientSupportsTerminal,
@@ -110,6 +111,7 @@ export function apply(ctx: Context, config: AcpBridgeConfig & ApplyOptions = {})
     config,
     terminalOutput: false,
     elicitation: false,
+    compaction: false,
     readDelegate(sessionId: SessionId) {
       const conn = connection
       // 能力位在握手时定下（`fsRead`），连接在 `onConnect` 时捕获；两者都没有
@@ -165,6 +167,7 @@ export function apply(ctx: Context, config: AcpBridgeConfig & ApplyOptions = {})
       presenter: record.presenter,
       terminal: { enabled: bridge.terminalOutput, cwd: record.cwd },
       contextWindow: record.handle.controls.contextWindow,
+      compaction: bridge.compaction,
     })) {
       bridge.notify(record.acpSessionId, update)
     }
@@ -277,6 +280,7 @@ export function apply(ctx: Context, config: AcpBridgeConfig & ApplyOptions = {})
       // 握手先于建会话，因此这里定下的能力对之后所有会话生效。
       bridge.terminalOutput = clientSupportsTerminal(params)
       bridge.elicitation = clientSupportsElicitation(params)
+      bridge.compaction = clientSupportsCompaction(params)
       fsRead = clientSupportsFsRead(params)
       // 记一行客户端能力位：一切降级行为的排查都从这里开始。走 stderr（AC-G1），
       // 且只在挂了 exporter 的组合里可见——测试装配不挂，因此不吵。

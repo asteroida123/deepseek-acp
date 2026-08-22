@@ -13,13 +13,16 @@ import LocalAttachments from '@deepseek-ai/dsh-attachment-local'
 import * as AgentInstructions from '@deepseek-ai/dsh-agent-instructions'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import SandboxBash from '@deepseek-ai/dsh-bash-sandbox'
+import * as CompactCommand from '@deepseek-ai/dsh-command-compact'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
+import BasicCompaction from '@deepseek-ai/dsh-compaction-basic'
 import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
 import { SandboxedFileSystem } from '@deepseek-ai/dsh-fs-sandbox'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import LlmService from '@deepseek-ai/dsh-llm'
 import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek'
 import PlanMode from '@deepseek-ai/dsh-plan-mode'
+import * as RepeatToolReminder from '@deepseek-ai/dsh-repeat-tool-reminder'
 import LocalSandbox from '@deepseek-ai/dsh-sandbox-local'
 import SandboxPolicy from '@deepseek-ai/dsh-sandbox-policy'
 import SessionService from '@deepseek-ai/dsh-session'
@@ -38,6 +41,7 @@ import * as BashTool from '@deepseek-ai/dsh-tool-bash'
 import * as FsSearchTool from '@deepseek-ai/dsh-tool-fs-search'
 import * as ToolSkill from '@deepseek-ai/dsh-tool-skill'
 import * as TodoTool from '@deepseek-ai/dsh-tool-todo'
+import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import ToolRegistry from '@deepseek-ai/dsh-tools'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import UserQuestions from '@deepseek-ai/dsh-user-questions'
@@ -270,6 +274,28 @@ export async function composeAgent(
   // 应答。那种自发回合发出的 `session/update` 没有对应的 `stopReason` 归属，
   // 编辑器侧也无从展示。要做得先设计非 prompt 触发的更新怎么归属（M1-c）。
   await ctx.plugin(BashTool, { enableRunInBackground: false })
+
+  // ── 上下文压缩 ──────────────────────────────────────────────────────
+  // 长会话撞到上下文上限时，把较早的一段总结成一条替换消息，而不是让下一次
+  // 请求直接以 `CONTEXT_WINDOW_EXCEEDED` 失败。编辑器里的会话本来就长（一个
+  // 下午的重构能跑几十轮），没有它这条链的终点就是「聊到一半突然不能聊了」。
+  //
+  // 挂**具体后端**（`-basic`）而不是 `dsh-compaction`——后者导出的
+  // `CompactionEngine` 是抽象基类，两个都挂会以「服务已注册」失败。这是这套代码
+  // 里第四对同构的坑（subprocess / settings / attachment / 这里）。
+  await ctx.plugin(TokenMeter, {})
+  // `auto: true` —— 压力触发自动压缩。ACP 没有「请压缩」这个方法，客户端也没有
+  // 触发它的入口，只能靠自动策略与 `/compact`。关掉它等于把这个能力藏进一条
+  // 用户得先知道才敲得出来的命令里。
+  await ctx.plugin(BasicCompaction, { auto: true })
+  // 人手触发：`/compact`。命令注册表已在上面挂好；这个命令不收配置。
+  await ctx.plugin(CompactCommand)
+
+  // ── 死循环护栏 ──────────────────────────────────────────────────────
+  // 不进工具表、不否决调用、不改写入参：只在连续同参重复调用时注入一条升级提示。
+  // 决定权仍在模型手里（合法的重复调用不被延迟也不被拦截），成本近乎为零，而它
+  // 挡住的是最难自愈的一种失败——模型拿同一个参数反复调同一个工具直到回合耗尽。
+  await ctx.plugin(RepeatToolReminder, {})
 
   // ── 图片输入（US-23）────────────────────────────────────────────────
   // 挂 `-local` 这个 provider，**不要**再挂 `dsh-attachment`——后者导出的
