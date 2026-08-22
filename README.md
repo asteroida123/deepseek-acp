@@ -47,6 +47,7 @@ DeepSeek Harness 自带一个 ACP server（`@deepseek-ai/dsh-acp`），但它的
 | 终端输出 | ✗ | ✅ 终端卡片（Zed `_meta` 约定） |
 | 待办计划 | ✗ | ✅ `plan` + 计划模式 |
 | 会话恢复 / 列表 | ✗ 关掉即消失 | ✅ `load` / `list` / `resume` / `close`，带标题 |
+| 会话分叉 | ✗ | ✅ `session/fork`，父子各写各的日志 |
 | 会话内换模型 | ✗ | ✅ 模型、推理档位、文件权限三个选择器 |
 | slash 命令 | ✗ | ✅ 命令目录，不进模型 |
 | 技能（skills） | ✗ | ✅ 模型按需加载；用户可调用的进斜杠补全 |
@@ -63,7 +64,16 @@ DeepSeek Harness 自带一个 ACP server（`@deepseek-ai/dsh-acp`），但它的
 模型可以就该次操作发起提权，提示走 `session/request_permission`。
 
 **内置工具**：`bash`、`read`、`write`、`edit`、`glob`、`grep`、`todo_write`、
-`ask_user_question`、`exit_plan_mode`。
+`ask_user_question`、`exit_plan_mode`，以及**按机器现有情况**决定的 `lsp`（见下）。
+
+**代码导航（`lsp`）。** 装了语言服务器就自动接上，没装就当它不存在——启动时按 `PATH`
+查一遍内置候选（`typescript-language-server`、`pyright-langserver`、`gopls`、
+`rust-analyzer`），一个都找不到就整套不挂。这不是偷懒：上游的 stdio 宿主在**插件加载时**
+解析每一项的可执行文件，任何一项找不到就没有 provider 注册得上，写死一张默认表等于
+「少装一个 gopls 就连不上编辑器」。要用别的服务器（`deno lsp`、项目本地的
+`node_modules/.bin/…`、自研的），设 `DEEPSEEK_ACP_LSP_SERVERS` 为一份 servers JSON，
+它**整表替换**内置候选。工具本身是只读的四个操作：`goToDefinition`、`findReferences`、
+`goToImplementation`、`hover`。
 
 **刻意不做的**：`fs/write_text_file` 委托（会绕开沙箱围栏，让「文件权限」选择器形同虚设）、
 后台任务（自发回合发出的更新没有对应的 `stopReason` 归属）、上游的 `packages/extensions/`

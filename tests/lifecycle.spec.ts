@@ -179,7 +179,7 @@ describe('TC-DIAG-01 握手能力位摘要', () => {
 })
 
 describe('TC-RESUME-02 能力声明跟着组合走', () => {
-  it('挂了持久化：close / list / resume 都声明，loadSession 也在', async () => {
+  it('挂了持久化：list / resume 出现，loadSession 也在', async () => {
     const h = await createHarness({ sessionsRoot: realTempDir('dsacp-caps-') })
     const init = await h.acp.request('initialize', { protocolVersion: 1, clientCapabilities: {} })
     const caps = init.agentCapabilities as {
@@ -187,11 +187,11 @@ describe('TC-RESUME-02 能力声明跟着组合走', () => {
       sessionCapabilities?: Record<string, unknown>
     }
     expect(caps.loadSession).toBe(true)
-    expect(Object.keys(caps.sessionCapabilities ?? {}).sort()).toEqual(['close', 'list', 'resume'])
+    expect(Object.keys(caps.sessionCapabilities ?? {}).sort()).toEqual(['close', 'fork', 'list', 'resume'])
     h.disposeBridge()
   }, 30_000)
 
-  it('没挂持久化：只剩 close —— 它释放的是进程内资源，与能否恢复无关', async () => {
+  it('没挂持久化：只剩 close 与 fork —— 两者要的都不是「能从日志恢复」', async () => {
     const h = await createHarness()
     const init = await h.acp.request('initialize', { protocolVersion: 1, clientCapabilities: {} })
     const caps = init.agentCapabilities as {
@@ -199,7 +199,10 @@ describe('TC-RESUME-02 能力声明跟着组合走', () => {
       sessionCapabilities?: Record<string, unknown>
     }
     expect(caps.loadSession).toBeUndefined()
-    expect(Object.keys(caps.sessionCapabilities ?? {})).toEqual(['close'])
+    // `close` 释放的是进程内资源；`fork` 的种子首选取自**活的**父会话，那条路径
+    // 同样不碰持久化（退化成「只能 fork 开着的会话」，而在会话随进程消失的部署里
+    // 那本就是唯一说得通的语义）。少掉的 `list` / `resume` 才是真正跟着日志走的。
+    expect(Object.keys(caps.sessionCapabilities ?? {}).sort()).toEqual(['close', 'fork'])
     h.disposeBridge()
   }, 30_000)
 

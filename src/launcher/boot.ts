@@ -40,6 +40,7 @@ import * as TodoTool from '@deepseek-ai/dsh-tool-todo'
 import ToolRegistry from '@deepseek-ai/dsh-tools'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import UserQuestions from '@deepseek-ai/dsh-user-questions'
+import { composeLsp, discoverLspServers, type LspServerSpec } from '../composition/lsp.js'
 import { ensurePiAi, settingsMentionsPiAi } from '../composition/pi-ai.js'
 import * as acpBridge from '../index.js'
 import { installToolCallStreamGuard } from './tool-call-stream-guard.js'
@@ -140,8 +141,15 @@ export function readEnv(env: NodeJS.ProcessEnv): LauncherEnv {
  * 不含 provider 适配器与凭据 —— 那两个是部署配置，不是 agent 能力。
  * @param ctx - 根 context
  * @param options.sessionsRoot - 会话日志落盘根目录，见 {@link sessionsRoot}
+ * @param options.lspServers - 已按 PATH 筛过的语言服务器表；缺省不挂 LSP。
+ *   **发现放在 `boot()`、组合放在这里**：PATH 随机器变，而这个函数的装配结果
+ *   必须给定输入就确定——否则 `tests/composition.spec.ts` 断的东西会变成
+ *   「跑测试的这台机器装没装 typescript-language-server」。见 `composition/lsp.ts`。
  */
-export async function composeAgent(ctx: Context, options: { sessionsRoot: string }): Promise<void> {
+export async function composeAgent(
+  ctx: Context,
+  options: { sessionsRoot: string; lspServers?: Readonly<Record<string, LspServerSpec>> },
+): Promise<void> {
   // 组合中不得挂 stdout logger —— stdout 属于协议。
   await ctx.plugin(SystemPrompt, { persona: PERSONA })
   for (const plugin of [SessionService, LlmService, ToolRegistry, AgentRegistry, AgentLoop]) {
@@ -261,6 +269,12 @@ export async function composeAgent(ctx: Context, options: { sessionsRoot: string
   // 应答。那种自发回合发出的 `session/update` 没有对应的 `stopReason` 归属，
   // 编辑器侧也无从展示。要做得先设计非 prompt 触发的更新怎么归属（M1-c）。
   await ctx.plugin(BashTool, { enableRunInBackground: false })
+
+  // ── 语言服务器（模型面 `lsp` 工具）──────────────────────────────────
+  // 一台机器上一个语言服务器都找不到时整套不挂：`tool-lsp` 会往**每一次**请求的
+  // 系统提示里塞一段固定引导，而那个工具的每次调用都只会报「没有路由」。用不上的
+  // 能力不该按次收费。
+  if (options.lspServers !== undefined) await composeLsp(ctx, options.lspServers)
 }
 
 /**
@@ -315,7 +329,16 @@ export async function boot(env: NodeJS.ProcessEnv, onClosed?: () => void): Promi
   // id/name 被逐片覆盖 → 空名派发）。不卸载：一个客户端连接就是一个进程，壳
   // 随进程一起走。
   installToolCallStreamGuard()
-  await composeAgent(ctx, { sessionsRoot: sessionsRoot(env) })
+  // 语言服务器按 PATH 现查：这是**部署环境**的事实，不是能力装配的一部分。
+  // 诊断走 `ctx.logger`，也就是上面那个 stderr exporter——一个配错的
+  // `DEEPSEEK_ACP_LSP_SERVERS` 不该让 agent 起不来，但也不该悄无声息。
+  const lspServers = await discoverLspServers(env, (message) => {
+    ctx.logger('lsp').warn(message)
+  })
+  await composeAgent(ctx, {
+    sessionsRoot: sessionsRoot(env),
+    ...(lspServers === undefined ? {} : { lspServers }),
+  })
   // watch 关掉：agent 是「一个客户端连接 = 一个进程」的短命子进程，热重载没有
   // 收益，而 fs watcher 会一直持有事件循环，让进程在 stdin 关闭后不退出。
   await ctx.plugin(LocalCredentials, { watch: false })

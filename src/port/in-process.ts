@@ -132,6 +132,38 @@ async function mapWithLimit<T, R>(
 }
 
 /**
+ * 选出可以当 fork 种子的那一段历史。
+ *
+ * 规则只有一条：**种子不能停在一个没结束的回合里**。上游对种子的校验写得很死
+ * （「no open turn/step or dangling tool call」），停在半截回合上会在建会话时
+ * 被拒——而那条错误信息是从会话边界深处抛出来的，读起来与用户做的事毫无关系。
+ *
+ * 与上游 `SessionStore.fork` 的差别在**撞上开着的回合时怎么办**：那边报
+ * `OPEN_TURN` 让调用方自己挑一个更早的 boundary，而 ACP 的 `session/fork` 根本
+ * 没有 boundary 参数，把错误原样转出去等于告诉用户「这个会话不能 fork」，且没有
+ * 任何补救办法。所以这里改成**往前退到最后一个完整回合**：
+ *
+ *  - 正常会话（最后一条是 `turn/end` 或其后的事件）→ 一条不丢，全量继承。
+ *  - 进程崩在半截回合上的日志 → 继承到上一个完整回合为止。那半截回合永远不会
+ *    补完，为它拒绝整次 fork 没有意义。
+ *
+ * 「回合正在跑」是另一回事，不在这里处理：那种情况下等一会儿就好，协议层会在
+ * 更早的地方拦下来并说清楚（见 `src/protocol/session-fork.ts`）。
+ * @param events - 父会话的完整事件日志，按 seq 升序
+ * @returns 可安全用作种子的前缀；父会话尚无事件时为空
+ */
+function forkSeed(events: readonly SessionEvent[]): readonly SessionEvent[] {
+  // 从后往前找第一个回合边界。找到 `turn/end` 说明最后一个回合是关上的，整段
+  // 都能用；找到 `turn/start` 说明它之后的事件属于一个没结束的回合。
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const type = events[index]?.type
+    if (type === 'turn/end') break
+    if (type === 'turn/start') return events.slice(0, index)
+  }
+  return events
+}
+
+/**
  * 从请求头里摘出授权密钥。
  *
  * ACP 的 `providers/set` 把密钥放在 `headers` 里（多半是 `Authorization:
@@ -671,6 +703,51 @@ export function createInProcessPort(ctx: Context): HarnessPort {
               readDelegate,
             )(agentCtx)
           },
+        })
+        return {
+          agent: handle.agent,
+          dispose: () => handle.dispose(),
+          controls: controlsFor(handle.agent, selection),
+          cwd: handle.agent.session.header.cwd,
+        }
+      },
+      async fork({ parentSessionId, sessionId, provider, model, mcpServers, readDelegate }) {
+        // 父会话的历史有两个来路，取**活的**那份优先：持久化是按窗口批量写的
+        // （`writeBatchMaxDelayMs`），刚说完的那句话可能还在缓冲里没落盘。从盘上
+        // 读会静默丢掉最后几条——fork 出来的会话少了刚刚那轮对话，而且看不出来。
+        const liveParent = agents.get(parentSessionId)?.session
+        // 落盘那条路径**只读一次**：`inspect` 读的是整份日志，事件与 cwd 各读一次
+        // 就是把一个几百轮的会话解析两遍。
+        const stored =
+          liveParent !== undefined || persistence === undefined
+            ? undefined
+            : await persistence.inspect(parentSessionId)
+        const parentCwd = liveParent?.header.cwd ?? stored?.meta.cwd
+        const seed = forkSeed(liveParent?.events ?? stored?.events ?? [])
+
+        const selection = initialSelection(provider, model)
+        // **`agents.create` 而不是 `ctx.sessions.fork`。** 后者看起来更贴切，但它
+        // 造的是一个**没有 agent 的裸会话**（内部也就是 `sessions.create(childId,
+        // {seed, meta})`），而 ACP 侧的会话必须有 agent 才能收 prompt，且上游没有
+        // 「给已存在的会话补一个 agent」这种操作。另外 `sessions.fork` 要求父会话
+        // 在活注册表里（上游 README 明确把「fork 一个已落盘但没加载的会话」排除在
+        // 外），而 ACP 的客户端完全可以从会话列表里挑一条没打开的去 fork。
+        const handle = await agents.create({
+          sessionId,
+          meta: {
+            ...(parentCwd === undefined ? {} : { cwd: parentCwd }),
+            // 血缘写进 header，因此它随日志落盘、也随恢复回来。这不只是元数据：
+            // `seedLength` 让恢复与重放分得清哪一段是继承来的、哪一段是这条会话
+            // 自己写的。
+            parentSession: parentSessionId,
+            seedLength: seed.length,
+          },
+          seed,
+          agentOptions: {
+            ...(provider !== undefined ? { provider } : {}),
+            ...(model !== undefined ? { model } : {}),
+          },
+          setup: setupSession(parentCwd, mcpServers, selection, readDelegate),
         })
         return {
           agent: handle.agent,

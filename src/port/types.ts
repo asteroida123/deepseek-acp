@@ -103,6 +103,25 @@ export interface SessionLifecycle {
     mcpServers?: readonly McpMountSpec[]
     readDelegate?: ClientTextReader
   }): Promise<AgentHandle & { readonly cwd: string | undefined }>
+  /**
+   * 以另一个会话的历史为种子，建一个**新**会话。
+   *
+   * 与 {@link resume} 的差别不只是 id：`resume` 让同一个会话活过来，之后写的
+   * 事件追加进**同一条**日志；`fork` 造的是一条独立日志，两边此后各写各的，
+   * 父会话不会因为子会话继续对话而改变。这正是 ACP `session/fork` 要的东西
+   * ——「基于这段上下文另开一支，不影响原来那条」。
+   *
+   * 种子取到**最后一个完整回合**为止，见实现里的 `forkSeed`。
+   * @returns 子会话句柄；`cwd` 取自父会话的 header（工作区随历史继承）
+   */
+  fork(options: {
+    parentSessionId: SessionId
+    sessionId: SessionId
+    provider?: string
+    model?: string
+    mcpServers?: readonly McpMountSpec[]
+    readDelegate?: ClientTextReader
+  }): Promise<AgentHandle & { readonly cwd: string | undefined }>
   /** 该 agent 是否仍在活注册表中且为同一对象（防同 id 冒充） */
   isLive(agent: Agent): boolean
 }

@@ -140,10 +140,33 @@ export class FakeLlmAdapter extends LlmAdapter {
   /** 每次 stream 实际收到的推理档位，按顺序；用于验证切换真的进了请求。 */
   effortsUsed: (string | undefined)[] = []
 
+  /**
+   * 每次 stream 收到的**完整对话历史**，压成 `角色:文本` 一行一条。
+   *
+   * fork 唯一要证明的事情就是这个：子会话的第一次请求里得带着父会话聊过的内容。
+   * 从会话表、header、日志文件去看都只能证明「历史被复制了」，证明不了它**进了
+   * 请求**——而后者才是「继承上下文」这句话的含义。
+   */
+  historiesUsed: string[][] = []
+
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.calls += 1
     this.modelsUsed.push(options.model)
     this.providersUsed.push(options.provider)
+    this.historiesUsed.push(
+      options.messages.map((message) => {
+        // 内容是块树；只把文本块拼起来，工具调用那些块对这个用途没有信息。
+        const content = message.content
+        const text =
+          typeof content === 'string'
+            ? content
+            : (content as { type?: string; text?: string }[] | undefined)
+                ?.filter((block) => block.type === 'text')
+                .map((block) => block.text ?? '')
+                .join('') ?? ''
+        return `${String(message.role)}:${text}`
+      }),
+    )
     this.effortsUsed.push(options.reasoningEffort === undefined ? undefined : String(options.reasoningEffort))
     if (this.failWith !== undefined) throw this.failWith
 

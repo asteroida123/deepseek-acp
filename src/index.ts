@@ -30,6 +30,7 @@ import { mapEvent } from './mapping/updates.js'
 import { createInProcessPort } from './port/in-process.js'
 import { handleCancel } from './protocol/session-cancel.js'
 import { handleCloseSession } from './protocol/session-close.js'
+import { handleForkSession } from './protocol/session-fork.js'
 import { handleResumeSession } from './protocol/session-resume.js'
 import {
   clientSupportsElicitation,
@@ -305,6 +306,7 @@ export function apply(ctx: Context, config: AcpBridgeConfig & ApplyOptions = {})
     .onRequest('session/list', ({ params }) => handleListSessions(bridge, params))
     .onRequest('session/close', ({ params }) => handleCloseSession(bridge, params))
     .onRequest('session/resume', ({ params }) => handleResumeSession(bridge, params))
+    .onRequest('session/fork', ({ params }) => handleForkSession(bridge, params))
     .onRequest('providers/list', ({ params }) => handleListProviders(bridge, params))
     .onRequest('providers/set', ({ params }) => handleSetProvider(bridge, params))
     .onRequest('providers/disable', ({ params }) => handleDisableProvider(bridge, params))
