@@ -12,12 +12,14 @@
  */
 
 import type { ResumeSessionRequest, ResumeSessionResponse } from '@agentclientprotocol/sdk'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Bridge } from '../bridge.js'
 import { methodNotFound } from '../codec/errors.js'
 import { modeStateFor } from '../config/modes.js'
 import { commandsUpdate } from './session-commands.js'
 import { optionsFor } from './session-config.js'
 import { restoreSession, validateRestore } from './session-load.js'
+import { rethrowMissingSession } from './session-missing.js'
 
 /**
  * @param bridge - 运行时
@@ -37,8 +39,12 @@ export async function handleResumeSession(
   validateRestore(params)
 
   // 与 `load` 不同，这里**不**预取事件日志：不回放就没有用处，而会话不存在时
-  // `sessions.resume` 自己会失败——同样是在发布 agent 之前。
-  const record = await restoreSession(bridge, params, 'session/resume')
+  // `sessions.resume` 自己会失败——同样是在发布 agent 之前。代价是那句失败埋在
+  // agent 工厂深处、且是个裸 `Error`，所以「不存在」要在这里另行分诊。
+  const record = await restoreSession(bridge, params, 'session/resume').catch(
+    async (error: unknown) =>
+      await rethrowMissingSession(bridge, params.sessionId as SessionId, error),
+  )
 
   // 命令目录仍要推：它是**当前**注册表的快照，与历史无关，而客户端刚建立这条
   // 会话的运行时视图，不给就只有一个空的命令面。会话 id 是客户端自己给的，

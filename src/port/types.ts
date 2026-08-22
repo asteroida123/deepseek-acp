@@ -125,6 +125,18 @@ export interface SessionLifecycle {
   }): Promise<AgentHandle & { readonly cwd: string | undefined }>
   /** 该 agent 是否仍在活注册表中且为同一对象（防同 id 冒充） */
   isLive(agent: Agent): boolean
+  /**
+   * 活注册表里有没有这个 id 的会话。
+   *
+   * 与 {@link isLive} 的差别是**手上有没有对象**：那个防的是同 id 冒充，要拿
+   * 已知 agent 去比对身份；这个只有客户端给的一个 id，答的是「这条会话此刻
+   * 是不是开着的」。
+   *
+   * 用途是给 {@link SessionCatalog.presence} 兜底：活着的会话未必在盘上——
+   * 写入是按窗口批量合并的，一条刚聊完的会话可能还在缓冲里；一条一个事件都
+   * 还没有的会话则根本没有物件（上游惰性物化）。只问磁盘会把它们判成不存在。
+   */
+  hasLive(sessionId: SessionId): boolean
 }
 
 /** 一条持久化会话的元数据摘要。 */
@@ -151,7 +163,29 @@ export interface SessionCatalog {
   list(): Promise<SessionSummary[]>
   /** 某会话的完整事件日志，按 seq 升序 */
   events(sessionId: SessionId): Promise<readonly SessionEvent[]>
+  /**
+   * 这个 id 的日志物件在不在。
+   *
+   * 它存在的唯一理由是**事后分诊**：别的读取已经失败了，据此判一句「是不存在，
+   * 还是在但坏了」。所以它不该被放到成功路径上——那是给每次恢复白加一次读盘，
+   * 换来的只是一个 TOCTOU 窗口更小的同样答案。
+   *
+   * **必须是三态而不是布尔。** 「查不出来」与「确认不存在」在这里是两件相反
+   * 的事：前者要求保持原样（继续报内部错误），后者才允许改判成 not found。
+   * 挤进一个布尔里，就只能给「查不出来」挑一个默认值，而挑错的那一半会静默
+   * 地把一类故障说成另一类。
+   */
+  presence(sessionId: SessionId): Promise<SessionPresence>
 }
+
+/**
+ * 一条会话的日志物件在这台机器上的存在状态。
+ *
+ *  - `absent`：**确认**没有这条日志。只有这一种允许把错误改判成 not found。
+ *  - `present`：物件在（哪怕内容是坏的）。
+ *  - `unknown`：查不出来——后端不提供逐会话的物件，或探测本身失败了。
+ */
+export type SessionPresence = 'absent' | 'present' | 'unknown'
 
 /** 一条命令的发现元数据。 */
 export interface CommandInfo {

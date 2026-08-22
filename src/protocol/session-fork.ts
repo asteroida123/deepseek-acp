@@ -17,12 +17,13 @@ import { isAbsolute } from 'node:path'
 import type { ForkSessionRequest, ForkSessionResponse } from '@agentclientprotocol/sdk'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Bridge } from '../bridge.js'
-import { invalidParams, internalError } from '../codec/errors.js'
+import { invalidParams, internalError, resourceNotFound } from '../codec/errors.js'
 import { modeStateFor } from '../config/modes.js'
 import { ToolPresenter } from '../presentation/presenter.js'
 import { mountSpecs } from './mcp-params.js'
 import { commandsUpdate } from './session-commands.js'
 import { optionsFor } from './session-config.js'
+import { rethrowMissingSession } from './session-missing.js'
 
 /**
  * @param bridge - 运行时
@@ -46,8 +47,9 @@ export async function handleForkSession(
   // 父会话不在本连接里就必须能从日志里读到——否则种子无从取起。没挂持久化的
   // 组合里这等于「只能 fork 开着的会话」，那也是那种部署唯一说得通的语义。
   if (parent === undefined && bridge.port.catalog === undefined) {
-    throw invalidParams(
-      `unknown session: ${parentSessionId} is not open in this connection and no session-persistence backend is composed`,
+    throw resourceNotFound(
+      parentSessionId,
+      'not open in this connection, and no session-persistence backend is composed — only open sessions can be forked here',
     )
   }
   // 回合进行中就拒绝，而不是把那半截回合裁掉。裁掉是**静默丢数据**：用户刚发出
@@ -62,19 +64,23 @@ export async function handleForkSession(
   const sessionId = SessionId(randomUUID())
   // seq 在翻译 MCP 之前分配，与 `session/new` 同理：前缀是会话内恒定的隔离标识。
   const seq = bridge.table.nextSeq()
-  const handle = await bridge.port.sessions.fork({
-    parentSessionId,
-    sessionId,
-    ...(bridge.config.provider !== undefined ? { provider: bridge.config.provider } : {}),
-    ...(bridge.config.model !== undefined ? { model: bridge.config.model } : {}),
-    mcpServers: mountSpecs(params.mcpServers ?? [], seq),
-    // 读改道绑的是**子**会话 id：编辑器发来的 `fs/read_text_file` 带的是它正在
-    // 交互的那条会话，而那条从现在起是子会话。
-    ...(() => {
-      const readDelegate = bridge.readDelegate(sessionId)
-      return readDelegate === undefined ? {} : { readDelegate }
-    })(),
-  })
+  // 种子取自父会话，因此「父会话不在了」是这条路径最常见的失败——它埋在 port 的
+  // `persistence.inspect` 里，与日志损坏抛的是同一种裸 `Error`，就地分诊开来。
+  const handle = await bridge.port.sessions
+    .fork({
+      parentSessionId,
+      sessionId,
+      ...(bridge.config.provider !== undefined ? { provider: bridge.config.provider } : {}),
+      ...(bridge.config.model !== undefined ? { model: bridge.config.model } : {}),
+      mcpServers: mountSpecs(params.mcpServers ?? [], seq),
+      // 读改道绑的是**子**会话 id：编辑器发来的 `fs/read_text_file` 带的是它正在
+      // 交互的那条会话，而那条从现在起是子会话。
+      ...(() => {
+        const readDelegate = bridge.readDelegate(sessionId)
+        return readDelegate === undefined ? {} : { readDelegate }
+      })(),
+    })
+    .catch(async (error: unknown) => await rethrowMissingSession(bridge, parentSessionId, error))
 
   const settled = async (error: Error): Promise<never> => {
     await handle.dispose()

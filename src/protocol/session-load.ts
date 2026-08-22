@@ -19,6 +19,7 @@ import type { SessionRecord } from '../session/table.js'
 import { mountSpecs } from './mcp-params.js'
 import { commandsUpdate } from './session-commands.js'
 import { optionsFor } from './session-config.js'
+import { rethrowMissingSession } from './session-missing.js'
 
 /**
  * 校验恢复请求。
@@ -149,7 +150,10 @@ export async function handleLoadSession(
 
   const sessionId = params.sessionId as SessionId
   // 先取历史再恢复：日志读不出来（不存在 / 损坏）时不该留下一个已发布的 agent。
-  const events = await catalog.events(sessionId)
+  // 而「不存在」与「损坏」对客户端是两件事，就地分开——见 rethrowMissingSession。
+  const events = await catalog
+    .events(sessionId)
+    .catch(async (error: unknown) => await rethrowMissingSession(bridge, sessionId, error))
   const record = await restoreSession(bridge, params, 'session/load')
   const { presenter, cwd } = record
 

@@ -146,6 +146,7 @@ describe('TC-LOAD-02 恢复的校验', () => {
         mcpServers: [],
       }),
     ).rejects.toThrow()
+    // 报的是哪个错误码由 TC-MISSING-* 钉住：`-32002` 而不是 `-32603`。
     h.disposeBridge()
   }, 30_000)
 })

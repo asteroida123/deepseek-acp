@@ -286,13 +286,25 @@ describe('TC-FORK-05 拒绝路径', () => {
     // 这种组合里种子无从取起：既不在内存里，也没有日志可读。给一个说得清原因的
     // 拒绝，好过建出一条空会话让用户以为继承成功了。
     const h = await createHarness()
-    await expect(
-      h.acp.request('session/fork', {
-        sessionId: 'never-existed' as never,
+    const ghost = 'never-existed'
+    let failure: { code?: number; message?: string; data?: unknown } | undefined
+    try {
+      await h.acp.request('session/fork', {
+        sessionId: ghost as never,
         cwd: realTempDir('dsacp-ws-'),
         mcpServers: [],
-      }),
-    ).rejects.toThrow(/unknown session/)
+      })
+    } catch (error: unknown) {
+      failure = error as never
+    }
+    expect(failure, '这次 fork 本该失败').toBeDefined()
+    // `-32002 Resource not found` 而不是 `-32603`：客户端据此把陈旧 id 从会话
+    // 列表里摘掉，而不是弹一个「agent 出错了」的框。见 TC-MISSING-*。
+    expect(failure?.code).toBe(-32002)
+    expect(failure?.data).toEqual({ uri: ghost })
+    // 这一条的原因不是自明的——同一个请求换个部署就能成功，所以消息里要说清是
+    // 这个部署不带持久化，否则用户只会反复重试。
+    expect(failure?.message).toMatch(/no session-persistence backend/)
     h.disposeBridge()
   }, 30_000)
 })

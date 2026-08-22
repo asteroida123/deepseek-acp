@@ -55,6 +55,7 @@ import type {
   ProviderPlane,
   SessionCatalog,
   SessionControls,
+  SessionPresence,
   SessionSummary,
   SkillPlane,
 } from './types.js'
@@ -442,6 +443,33 @@ export function createInProcessPort(ctx: Context): HarnessPort {
             const inspection = await persistence.inspect(sessionId)
             return inspection.events
           },
+          async presence(sessionId: SessionId): Promise<SessionPresence> {
+            // 上游对「会话不存在」抛的是一个**裸 `Error`**，消息是
+            // `session "..." not found`，没有错误码也没有类型。靠匹配那句话来
+            // 分诊，等于把一条错误信息的措辞当成 API——上游哪天改了文案，我们
+            // 会**静默**退回「一律 Internal error」，而且没有任何用例会发现。
+            // 所以这里独立问一次。
+            //
+            // **不能拿 `list()` 当判据**：JSONL 后端在列举时会静默跳过空文件与
+            // 解析不了的头部（`listArtifacts` 里两处 `continue`），于是一条头部
+            // 损坏的会话在清单里根本不出现。实测同一条会话 `list()` 返回 `[]`、
+            // `inspect()` 抛 `corrupt session log: header line is not valid JSON`
+            // ——照清单判，就会把「日志坏了」说成「会话没了」，而那正是这套分诊
+            // 最该避免的那个误判。
+            //
+            // `readRaw` 才是能把两者分开的那个接口，上游写得很明确：「调用方先测
+            // `supportsRawArtifacts`，此时 `undefined` **只**表示这个会话没有已
+            // 物化的物件」。它还是**逐 id** 的（内部 `findLog(id)`），不存在的
+            // 会话在读任何字节之前就返回了。
+            if (!persistence.supportsRawArtifacts) return 'unknown'
+            try {
+              return (await persistence.readRaw(sessionId)) === undefined ? 'absent' : 'present'
+            } catch {
+              // 读不出来就不改判。这里**不**断言「物件一定在」——根目录编码不符、
+              // 目录读不动都会走到这儿——但两种情形要的处理是同一个：保持原样。
+              return 'present'
+            }
+          },
         }
 
   const commands: CommandPlane | undefined =
@@ -785,6 +813,9 @@ export function createInProcessPort(ctx: Context): HarnessPort {
           controls: controlsFor(handle.agent, selection),
           cwd: handle.agent.session.header.cwd,
         }
+      },
+      hasLive(sessionId: SessionId): boolean {
+        return agents.get(sessionId) !== undefined
       },
       isLive(agent: Agent): boolean {
         // 身份比对而非仅比 id：agent-loop 单独重载会释放其 agent，
