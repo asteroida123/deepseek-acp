@@ -9,6 +9,7 @@
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
+import LocalAttachments from '@deepseek-ai/dsh-attachment-local'
 import * as AgentInstructions from '@deepseek-ai/dsh-agent-instructions'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import SandboxBash from '@deepseek-ai/dsh-bash-sandbox'
@@ -269,6 +270,15 @@ export async function composeAgent(
   // 应答。那种自发回合发出的 `session/update` 没有对应的 `stopReason` 归属，
   // 编辑器侧也无从展示。要做得先设计非 prompt 触发的更新怎么归属（M1-c）。
   await ctx.plugin(BashTool, { enableRunInBackground: false })
+
+  // ── 图片输入（US-23）────────────────────────────────────────────────
+  // 挂 `-local` 这个 provider，**不要**再挂 `dsh-attachment`——后者导出的
+  // `AttachmentStore` 是抽象基类，两个都挂会以「服务已注册」失败。与 subprocess、
+  // settings 那两对是同一个坑。
+  //
+  // 图片字节落进 `$DSH_HOME/attachments/v1/` 的内容寻址库，会话日志里只留引用。
+  // 直接把 base64 写进日志会让一条日志涨到几十 MB，而每次恢复都要整份读回来。
+  await ctx.plugin(LocalAttachments, {})
 
   // ── 语言服务器（模型面 `lsp` 工具）──────────────────────────────────
   // 一台机器上一个语言服务器都找不到时整套不挂：`tool-lsp` 会往**每一次**请求的

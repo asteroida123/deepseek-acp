@@ -7,6 +7,7 @@
  * @module
  */
 
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type { ClientTextReader } from '../composition/session-fs.js'
@@ -292,6 +293,54 @@ export interface ProviderPlane {
   disable(id: string): Promise<void>
 }
 
+/** 一张待准入的图片，base64 线上形态。 */
+export interface EncodedImage {
+  /** 声明的 media type；准入时会拿解码后的字节核对 */
+  readonly mediaType: string
+  /** 规范 base64（RFC 4648）；URL-safe 别名与空白都会被拒 */
+  readonly data: string
+  /** 展示名；**永不当作路径解释** */
+  readonly name?: string
+}
+
+/**
+ * 一段待提交的用户输入，按**线序**排列。
+ *
+ * 保序不是讲究：「这是改之前的截图 [图] 这是改之后的 [图]」在图片被挪到末尾之后
+ * 就成了另一句话。ACP 的 prompt 本来就是有序块数组，上游的消息内容也是，中间这
+ * 一层没有理由把顺序丢掉。
+ */
+export type PromptPart =
+  | { readonly kind: 'text'; readonly text: string }
+  | { readonly kind: 'image'; readonly image: ImageAttachmentRef }
+
+/**
+ * 图片输入面（US-23）。
+ *
+ * 组合没挂附件服务时整体为 undefined —— 此时 `promptCapabilities.image` 报 false，
+ * 发来的图片块会被显式拒绝（AC-G2），而不是静默丢掉。
+ */
+export interface ImagePlane {
+  /** 本部署接受的图片 media type 词表，供拒绝信息说清楚「那你要什么」 */
+  readonly mediaTypes: readonly string[]
+  /**
+   * 某条路由收不收图片。
+   *
+   * **按会话当前路由逐次问**，不是启动时问一次：阶段 1 之后模型可以中途换，
+   * 一个在建会话时成立的答案在第三轮可能已经不成立了。解析不出来时报 false
+   * ——宁可拒绝一次能成的请求，也不要让它到适配器那里再炸。
+   */
+  accepts(provider: string, model: string): Promise<boolean>
+  /**
+   * 校验并落盘一批图片，返回可写进消息的引用。
+   *
+   * **整批要么全成要么全败**（上游 `saveImages` 的语义）：一半图片落了盘、另一半
+   * 没有，那条消息就是残的，而模型看不出少了什么。
+   * @throws 准入被拒时抛上游的 `AttachmentError`
+   */
+  admit(images: readonly EncodedImage[]): Promise<readonly ImageAttachmentRef[]>
+}
+
 /** 会话事件订阅。 */
 export interface EventSource {
   /**
@@ -312,8 +361,9 @@ export interface AgentDriver {
    *
    * 分两步是必须的：in-flight 槽位要在入队前武装（监听器驱动的同步回合可能
    * 在入队调用返回前就跑完），而武装时就需要 messageId 才能建立相关性。
+   * @param parts - 按线序排列的文本与图片，见 {@link PromptPart}
    */
-  prepare(text: string): { readonly messageId: string; readonly submit: (agent: Agent) => void }
+  prepare(parts: readonly PromptPart[]): { readonly messageId: string; readonly submit: (agent: Agent) => void }
   cancel(agent: Agent): void
   /** 整体静默（非单个回合结束）—— prompt 的正确结算点 */
   whenIdle(agent: Agent): Promise<void>
@@ -346,6 +396,8 @@ export interface HarnessPort {
   readonly modes: ModePlane | undefined
   /** provider 配置面；组合没挂可写的设置服务时 undefined */
   readonly providers: ProviderPlane | undefined
+  /** 图片输入面；组合没挂附件服务时 undefined */
+  readonly images: ImagePlane | undefined
   /**
    * 当前注册着适配器的全部 provider 路由。
    *

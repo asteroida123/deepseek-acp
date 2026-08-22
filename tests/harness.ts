@@ -26,6 +26,7 @@ import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import UserQuestions from '@deepseek-ai/dsh-user-questions'
 import * as AskUserTool from '@deepseek-ai/dsh-tool-ask-user'
 import LlmService from '@deepseek-ai/dsh-llm'
+import LocalAttachments from '@deepseek-ai/dsh-attachment-local'
 import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
 import FileSettings from '@deepseek-ai/dsh-settings-file'
 import LocalSandbox from '@deepseek-ai/dsh-sandbox-local'
@@ -293,6 +294,15 @@ export async function createHarness(
      * 一个忘了隔离的用例会去改本机真正的 `~/.dsh/.credentials.yaml`。
      */
     settings?: string
+    /**
+     * 挂附件服务（图片输入，US-23），对象库**关进这个目录**。
+     *
+     * 与 `settings` 同样给路径而不是布尔，理由也一样且同样硬：图片准入会真的
+     * 往盘上写内容寻址对象，不隔离就写进本机的 `~/.dsh/attachments/`。而这些
+     * 对象目前**永不回收**（上游把 GC 推迟了），跑一遍用例就在用户家目录里留
+     * 一堆再也没人认领的文件。
+     */
+    attachments?: string
   } = {},
 ): Promise<TestHarness> {
   const ctx = new Context()
@@ -409,6 +419,12 @@ export async function createHarness(
     // 走与生产同一条幂等入口：`providers/*` 也会调它，两处各挂一次会以
     // 「路由已注册」失败。
     await ensurePiAi(ctx)
+  }
+
+  if (options.attachments !== undefined) {
+    // `dshHome` 显式给出：`attachment-local` 缺省会走 `$DSH_HOME` 再退到
+    // `~/.dsh`，而用例绝不能写进那里。
+    await ctx.plugin(LocalAttachments, { dshHome: options.attachments })
   }
 
   // 只伪造模型这一层；回合生命周期走真实 agent loop。

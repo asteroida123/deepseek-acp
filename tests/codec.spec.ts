@@ -96,27 +96,38 @@ describe('promptHasUnsupportedContent', () => {
     expect(promptHasUnsupportedContent(prompt)).toBe(false)
   })
 
-  it('识别出 image / audio —— 这两项确实未 advertise', () => {
-    const blocks: ContentBlock[] = [
-      { type: 'image', data: 'x', mimeType: 'image/png' },
-      { type: 'audio', data: 'x', mimeType: 'audio/wav' },
-    ]
-    for (const block of blocks) {
-      expect(promptHasUnsupportedContent([block]), block.type).toBe(true)
-    }
+  it('识别出 audio —— 上游没有音频路由，它确实未 advertise', () => {
+    expect(promptHasUnsupportedContent([{ type: 'audio', data: 'x', mimeType: 'audio/wav' }])).toBe(true)
+  })
+
+  it('放行 image —— 它能不能真的收下不是纯函数判得了的', () => {
+    // 图片要不要拒绝取决于两件运行时的事：组合挂没挂附件服务、以及会话**当前**
+    // 这条路由收不收图。所以这里放行，由 `handlePrompt` 用具体理由拒绝——那种
+    // 拒绝说得出「换哪个模型」，而这里只能说「不支持」。
+    expect(promptHasUnsupportedContent([{ type: 'image', data: 'x', mimeType: 'image/png' }])).toBe(false)
   })
 
   it('放行集合与 initialize 声明的能力**逐项一致**', () => {
     // 两处是同一件事的两半，分开写就会分叉：那边多声明一项而这边不放行，
     // 客户端收到的是「你说你支持」的困惑错误；这边多放行而那边不声明，
     // 规矩的客户端根本不会发过来。这条用例就是把它们钉在一起。
-    const caps = handleInitialize().agentCapabilities?.promptCapabilities
+    //
+    // `image: true` 是必须传的：它**按组合动态声明**（挂了附件服务才为真），
+    // 而纯函数这边没有组合可看，恒放行。拿默认参数去比等于拿「没挂附件服务的
+    // 部署」跟「放行集合」比，那两者本来就不该相等。
+    const caps = handleInitialize({ persistent: false, image: true }).agentCapabilities
+      ?.promptCapabilities
     const probe = (block: ContentBlock): boolean => !promptHasUnsupportedContent([block])
     expect(probe({ type: 'image', data: 'x', mimeType: 'image/png' })).toBe(caps?.image ?? false)
     expect(probe({ type: 'audio', data: 'x', mimeType: 'audio/wav' })).toBe(caps?.audio ?? false)
     expect(probe({ type: 'resource', resource: { uri: 'file:///a', text: 'x' } })).toBe(
       caps?.embeddedContext ?? false,
     )
+  })
+
+  it('没挂附件服务时 initialize 不声明 image', () => {
+    // 与上面那条互补：动态声明真的是动态的，不是恒 true。
+    expect(handleInitialize().agentCapabilities?.promptCapabilities?.image).toBe(false)
   })
 })
 

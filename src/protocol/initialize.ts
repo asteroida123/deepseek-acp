@@ -172,7 +172,9 @@ export function describeClient(params: InitializeRequest): string {
  * @returns 本 bridge 的 initialize 应答
  */
 export function handleInitialize(
-  options: { persistent: boolean; terminalAuth?: boolean; providers?: boolean } = { persistent: false },
+  options: { persistent: boolean; terminalAuth?: boolean; providers?: boolean; image?: boolean } = {
+    persistent: false,
+  },
 ): InitializeResponse {
   return {
     // 单版本 agent：规范里「支持则同版本，否则取最新支持版本」两条分支
@@ -182,8 +184,19 @@ export function handleInitialize(
     agentCapabilities: {
       // `embeddedContext` 已实现：内嵌 `resource` 块的文本整段内联（`src/codec/prompt.ts`），
       // 这是「@ 一个文件、内容直接带过来」的通道，也能带上磁盘上根本没有的东西。
-      // image / audio 仍未实现，见 README 的「已关闭」一节（上游无多模态路由）。
-      promptCapabilities: { image: false, audio: false, embeddedContext: true },
+      // audio 仍未实现（上游没有音频路由）。
+      //
+      // **`image` 跟着附件服务走，不跟着「当前模型收不收图」走。** 这是一个取舍，
+      // 值得写清楚：能力位是**连接级**的（握手时声明一次），而「这条路由收不收图」
+      // 是**会话级且可变**的（阶段 1 之后模型能中途换）。用部署默认模型去决定它的
+      // 话，默认模型 `deepseek-v4-flash` 是纯文本的，于是能力位恒为 false，客户端
+      // 直接把上传入口藏掉——用户就算切到 vision 模型也再没有办法把图发进来，
+      // 功能等于不存在。
+      //
+      // 反过来声明了却在纯文本模型上发图，用户会收到一条**说得出怎么办**的拒绝
+      // （见 `session-prompt.ts` 的 `admitImages`：报出当前模型名，让去模型选择器
+      // 里换）。两种错法里，这一种是用户自己能走出来的。
+      promptCapabilities: { image: options.image === true, audio: false, embeddedContext: true },
       // **`McpCapabilities` 只描述非 stdio 传输**：stdio 是所有 agent 的基线，
       // 没有位可以表示「支持/不支持 stdio」（也因此无法声明「完全不支持 MCP」）。
       // 这里声明的是本部署确实翻译得了的那两种之外的情况：

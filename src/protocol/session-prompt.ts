@@ -11,9 +11,15 @@ import type { PromptRequest, PromptResponse, StopReason } from '@agentclientprot
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Bridge } from '../bridge.js'
 import { invalidParams, internalError } from '../codec/errors.js'
-import { acpPromptToText, promptHasUnsupportedContent } from '../codec/prompt.js'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import {
+  acpPromptToParts,
+  acpPromptToText,
+  promptHasUnsupportedContent,
+  promptImages,
+} from '../codec/prompt.js'
 import { turnEndToStopReason } from '../codec/stop-reason.js'
-import type { CommandOutcome } from '../port/types.js'
+import type { CommandOutcome, EncodedImage } from '../port/types.js'
 import type { InflightPrompt, SessionRecord } from '../session/table.js'
 
 /**
@@ -86,6 +92,57 @@ async function runCommand(
 }
 
 /**
+ * 校验并落盘这一轮的图片（US-23）。
+ *
+ * 三道关，每一道拒绝的理由都不一样，因此错误信息也不该一样：
+ *
+ *  1. **组合没挂附件服务** —— 这个部署根本处理不了图片。`promptCapabilities.image`
+ *     此时报 false，规矩的客户端不会走到这里。
+ *  2. **会话当前这条路由收不了图** —— 部署能处理，但用户选中的模型是纯文本的。
+ *     这是唯一一个用户自己能解决的情况，所以信息里要说出怎么解决。**逐次检查**：
+ *     阶段 1 之后模型可以中途换，建会话时的答案不作数。
+ *  3. **准入被拒**（太大、张数超限、不是真的 PNG、base64 不规范）—— 上游的
+ *     `AttachmentError` 已经把原因写清楚了，原样转出去。
+ * @param bridge - 运行时
+ * @param record - 会话记录
+ * @param pending - 待准入的图片，按线序
+ * @returns 与入参同序的附件引用；没有图片时空数组
+ */
+async function admitImages(
+  bridge: Bridge,
+  record: SessionRecord,
+  pending: readonly EncodedImage[],
+): Promise<readonly ImageAttachmentRef[]> {
+  if (pending.length === 0) return []
+  const plane = bridge.port.images
+  if (plane === undefined) {
+    throw invalidParams('image prompts are unavailable: no attachment store is composed')
+  }
+
+  const provider = record.handle.controls.provider()
+  const model = record.handle.controls.model()
+  if (provider === undefined || model === undefined) {
+    throw internalError('image prompts require a resolved provider/model route')
+  }
+  if (!(await plane.accepts(provider, model))) {
+    // 说出模型名，因为下拉框里显示的就是它——只说「当前模型不支持」会让用户
+    // 去翻是哪个。上游适配器对这种情况也会拒绝，但那是在请求路上抛的
+    // `UNSUPPORTED_CONTENT`，表现为一个失败的回合而不是一次被拒的请求。
+    throw invalidParams(
+      `model "${model}" does not accept image input; switch to a vision-capable model in this session's model selector`,
+    )
+  }
+
+  try {
+    return await plane.admit(pending)
+  } catch (error: unknown) {
+    // 准入失败一律算调用方的输入问题：能走到这一步说明服务在、路由也对，剩下
+    // 的只可能是这批字节本身不合格。
+    throw invalidParams(error instanceof Error ? error.message : String(error))
+  }
+}
+
+/**
  * @param bridge - 运行时
  * @param params - ACP 请求
  * @returns 该轮的 stop reason
@@ -102,10 +159,12 @@ export async function handlePrompt(bridge: Bridge, params: PromptRequest): Promi
   }
   // AC-G2：不支持的内容显式拒绝，不静默丢弃。
   if (promptHasUnsupportedContent(params.prompt)) {
-    throw invalidParams('only text, resource_link and embedded resource prompt content is supported')
+    throw invalidParams('only text, image, resource_link and embedded resource prompt content is supported')
   }
+  const pendingImages = promptImages(params.prompt)
   const text = acpPromptToText(params.prompt)
-  if (text.trim().length === 0) throw invalidParams('empty prompt')
+  // 有图片时文本可以是空的——「这张图里是什么」用户完全可能只贴一张图。
+  if (pendingImages.length === 0 && text.trim().length === 0) throw invalidParams('empty prompt')
 
   // 不驱动已退休的 agent：agent-loop 单独重载会释放其 agent，而本表的记录
   // 仍在；已释放的机器会静默接受入队，prompt 将永不结算。
@@ -115,12 +174,19 @@ export async function handlePrompt(bridge: Bridge, params: PromptRequest): Promi
 
   // 命令面优先：`/` 开头且解析得到的输入不进模型（US-18）。判定交给上游的
   // 注册表，本层不自己认斜杠——两处各判一次迟早会分叉。
-  const asCommand = await runCommand(bridge, record, text)
-  if (asCommand !== undefined) return asCommand
+  //
+  // **带图片的输入不走命令面**：命令的入参是那一行文本，图片在那里没有落点，
+  // 而把它默默丢掉正是 AC-G2 要禁止的事。
+  if (pendingImages.length === 0) {
+    const asCommand = await runCommand(bridge, record, text)
+    if (asCommand !== undefined) return asCommand
+  }
+
+  const admitted = await admitImages(bridge, record, pendingImages)
 
   // 先构造消息以拿到 id，再武装槽位，最后才入队：监听器驱动的同步回合可能
   // 在入队调用返回前就跑完，槽位晚装或 id 未知都会错过相关性。
-  const pending = bridge.port.driver.prepare(text)
+  const pending = bridge.port.driver.prepare(acpPromptToParts(params.prompt, admitted))
 
   const stopReason = await new Promise<StopReason>((resolve, reject) => {
     const inflight: InflightPrompt = {

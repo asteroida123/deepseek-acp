@@ -34,6 +34,15 @@ export const FAKE_PROVIDER_ALT = 'fake-alt'
  */
 export const FAKE_MODEL_ALT = 'fake-model-pro'
 
+/**
+ * 收图片的模型。
+ *
+ * 目录里必须**同时**有收图和不收图的模型，US-23 那条链才测得全：只有收图的
+ * 模型时「纯文本模型上发图要被拒」永远走不到，而那正是用户最容易撞上的路径
+ * （部署默认模型就是纯文本的）。
+ */
+export const FAKE_MODEL_VISION = 'fake-model-vision'
+
 /** 可编排的假适配器。 */
 export class FakeLlmAdapter extends LlmAdapter {
   /** 每次调用产出的文本分片；分成多片以便验证增量转发 */
@@ -95,10 +104,20 @@ export class FakeLlmAdapter extends LlmAdapter {
    */
   providersUsed: string[] = []
 
+  /**
+   * 是否把 {@link FAKE_MODEL_VISION} 也列进目录。
+   *
+   * 默认关：多数用例断的是一个两项的模型下拉，凭空多一项会让它们全部失配，而
+   * 那些用例与图片毫无关系。要在会话里**切到**收图模型必须打开它——配置项只
+   * 接受它 advertise 过的取值。
+   */
+  offerVisionModel = false
+
   override async listModels(provider: string) {
     return [
       { provider, id: FAKE_MODEL, name: FAKE_MODEL },
       { provider, id: FAKE_MODEL_ALT, name: FAKE_MODEL_ALT },
+      ...(this.offerVisionModel ? [{ provider, id: FAKE_MODEL_VISION, name: FAKE_MODEL_VISION }] : []),
     ]
   }
 
@@ -124,6 +143,12 @@ export class FakeLlmAdapter extends LlmAdapter {
       id: model,
       name: model,
       context: { contextWindow: 8192 },
+      // **不受 `offerVisionModel` 影响**：那个开关管的是「列不列进下拉框」，
+      // 而解析是按 id 查的。真实目录同样可以解析出没列在默认清单里的模型。
+      //
+      // 显式写出 `['text']` 而不是省略：上游把「缺席」定义为**不知道**、把显式
+      // 省略定义为**否定能力**，两者在准入判断上是两回事。
+      inputModalities: model === FAKE_MODEL_VISION ? (['text', 'image'] as const) : (['text'] as const),
       ...(efforts.length === 0
         ? {}
         : {
@@ -149,10 +174,39 @@ export class FakeLlmAdapter extends LlmAdapter {
    */
   historiesUsed: string[][] = []
 
+  /**
+   * 每次 stream 里**带图片的那条消息**的内容块类型序列，按调用顺序。
+   *
+   * 图片这条链上「顺序」是会悄悄错的那一环：`[文本][图][文本]` 被拍成
+   * `[文本+文本][图]` 时，模型看到的是另一句话，而任何「有没有收到图片」的断言
+   * 都照样通过。所以要能看见块的排列，不只是它们的存在。
+   *
+   * **按内容找而不是按位置找**：请求里除了用户消息还有运行时上下文快照那类注入
+   * 消息，它们的位置不由本用例决定（`at(-1)` 拿到的经常是快照而不是用户那条）。
+   */
+  blockKindsUsed: string[][] = []
+
+  /** 每次 stream 收到的图片附件 id，跨全部消息按序收集。 */
+  imagesUsed: string[][] = []
+
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.calls += 1
     this.modelsUsed.push(options.model)
     this.providersUsed.push(options.provider)
+    {
+      type Block = { type?: string; attachment?: { attachmentId?: string } }
+      const perMessage = options.messages.map((message) =>
+        Array.isArray(message.content) ? (message.content as Block[]) : [],
+      )
+      this.imagesUsed.push(
+        perMessage
+          .flat()
+          .filter((block) => block.type === 'image')
+          .map((block) => String(block.attachment?.attachmentId)),
+      )
+      const withImage = perMessage.find((blocks) => blocks.some((block) => block.type === 'image'))
+      this.blockKindsUsed.push((withImage ?? perMessage.at(-1) ?? []).map((block) => String(block.type)))
+    }
     this.historiesUsed.push(
       options.messages.map((message) => {
         // 内容是块树；只把文本块拼起来，工具调用那些块对这个用途没有信息。

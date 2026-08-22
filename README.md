@@ -56,6 +56,7 @@ DeepSeek Harness 自带一个 ACP server（`@deepseek-ai/dsh-acp`），但它的
 | 上下文用量 | ✗ | ✅ `usage_update` 进度条 |
 | 读未保存的缓冲区 | ✗ | ✅ `fs/read_text_file` 改道到编辑器 |
 | 内嵌上下文（@ 文件） | ✗ `embeddedContext: false` | ✅ 整段内联 |
+| 图片输入 | ✗ `image: false` | ✅ 按线序进模型，字节落内容寻址库 |
 | 授权提示 | ✅ 一次性 allow / reject | ✅ 同左，另含沙箱越界提权 |
 | 多会话 | ✅ | ✅ |
 
@@ -65,6 +66,12 @@ DeepSeek Harness 自带一个 ACP server（`@deepseek-ai/dsh-acp`），但它的
 
 **内置工具**：`bash`、`read`、`write`、`edit`、`glob`、`grep`、`todo_write`、
 `ask_user_question`、`exit_plan_mode`，以及**按机器现有情况**决定的 `lsp`（见下）。
+
+**图片输入。** 贴图或拖图进来即可，文本与图片**按线序**进模型（「改之前 [图] 改之后 [图]」
+不会被拍成「改之前改之后 [图][图]」）。字节落进 `$DSH_HOME/attachments/` 的内容寻址库，
+会话日志里只留引用——base64 直接写进日志会让一条日志涨到几十 MB，而每次恢复都要整份读回来。
+默认模型 `deepseek-v4-flash` **不收图片**：发图会被拒绝，并告诉你去模型选择器里换成
+`deepseek-v4-flash-vision-exp`。接受 PNG / JPEG / WebP / GIF，单条消息最多 20 张。
 
 **代码导航（`lsp`）。** 装了语言服务器就自动接上，没装就当它不存在——启动时按 `PATH`
 查一遍内置候选（`typescript-language-server`、`pyright-langserver`、`gopls`、
@@ -79,7 +86,7 @@ DeepSeek Harness 自带一个 ACP server（`@deepseek-ai/dsh-acp`），但它的
 后台任务（自发回合发出的更新没有对应的 `stopReason` 归属）、上游的 `packages/extensions/`
 （`cordis_define` / `cordis_run` 那套「模型改写自身运行时」——它在 `node:vm` 里跑、拿到活的
 服务门面，绕开上面那道围栏；且它的启动控件是浏览器半边，没发布到 npm）。**受阻于上游的**：
-图片输入、`session/delete`、MCP 的 `sse` / `acp` 传输。
+`session/delete`（持久化后端至今没有 delete/purge API）、MCP 的 `sse` / `acp` 传输。
 
 ---
 

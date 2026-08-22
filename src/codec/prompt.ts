@@ -4,6 +4,8 @@
  */
 
 import type { ContentBlock, EmbeddedResourceResource } from '@agentclientprotocol/sdk'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import type { EncodedImage, PromptPart } from '../port/types.js'
 
 /**
  * 内嵌资源 → 文本。
@@ -14,7 +16,10 @@ import type { ContentBlock, EmbeddedResourceResource } from '@agentclientprotoco
  *
  * 二进制资源没法内联：base64 塞进提示词既贵又没用。渲染成一条带 uri 与
  * mimeType 的引用——**不静默丢弃**，模型看得见「这里有个附件但我读不了」，
- * 比凭空少一段上下文强。真正的图片支持是 US-23，受阻于上游（见 README）。
+ * 比凭空少一段上下文强。
+ *
+ * 图片走的是另一条路（顶层的 `image` 块，见 {@link promptImages}），不经过这里
+ * ——内嵌资源里的图片字节没有 media type 之外的准入信息，而附件准入要的正是那些。
  * @param resource - 内嵌的资源负载
  * @returns 拍平后的文本
  */
@@ -57,18 +62,79 @@ export function acpPromptToText(prompt: readonly ContentBlock[]): string {
  * 是否含本 bridge 未 advertise 的内容。
  *
  * 规范要求每个 agent 都接受 `text` 与 `resource_link`；`resource`（内嵌上下文）
- * 是可选能力，本 bridge **已** advertise（`promptCapabilities.embeddedContext`），
- * 因此也在受支持之列。剩下的 image / audio 仍未 advertise，**显式拒绝而非静默
+ * 与 `image` 是可选能力，本 bridge 都 advertise（后者按组合动态，见
+ * {@link HarnessPort.images}）。剩下的 audio 仍未 advertise，**显式拒绝而非静默
  * 丢弃**（验收标准 AC-G2）。
  *
  * 这个集合与 `handleInitialize` 里的 `promptCapabilities` 是同一件事的两半：
  * 那边多声明一项而这边不放行，客户端会收到「你说你支持」的困惑错误；这边多
  * 放行一项而那边不声明，规矩的客户端根本不会发过来。改一处必须改另一处。
+ *
+ * **`image` 只在这里放行，能不能真的收下是调用方的事**：图片要不要拒绝取决于
+ * 组合挂没挂附件服务、以及会话**当前**这条路由收不收图，两者都不是纯函数看得
+ * 到的东西。所以这里放行、由 `handlePrompt` 用具体理由拒绝——那种拒绝信息能
+ * 说清楚「换哪个模型」，而这里只能说「不支持」。
  * @param prompt - 待检查的 ACP prompt 块
  * @returns 存在未 advertise 的块时为 `true`
  */
 export function promptHasUnsupportedContent(prompt: readonly ContentBlock[]): boolean {
   return prompt.some(
-    (block) => block.type !== 'text' && block.type !== 'resource_link' && block.type !== 'resource',
+    (block) =>
+      block.type !== 'text' &&
+      block.type !== 'resource_link' &&
+      block.type !== 'resource' &&
+      block.type !== 'image',
   )
+}
+
+/**
+ * 取出顶层的图片块，按线序。
+ * @param prompt - ACP prompt 块
+ * @returns 待准入的图片；没有图片时空数组
+ */
+export function promptImages(prompt: readonly ContentBlock[]): EncodedImage[] {
+  return prompt.flatMap((block): EncodedImage[] =>
+    block.type === 'image'
+      ? [{ mediaType: block.mimeType, data: block.data, ...(block.uri == null ? {} : { name: block.uri })}]
+      : [],
+  )
+}
+
+/**
+ * 按线序重建内容树：文本累积成段，图片插进它原本的位置。
+ *
+ * **相邻文本并成一块**而不是一块一块地发：`[文本][文本][图]` 与
+ * `[文本+文本][图]` 对模型是同一段内容，但前者会让每个 `resource_link` 各占一
+ * 个块，把一句话切得七零八落。
+ * @param prompt - ACP prompt 块
+ * @param images - 与 {@link promptImages} **同序**的准入结果
+ * @returns 可交给 `driver.prepare` 的有序片段
+ */
+export function acpPromptToParts(
+  prompt: readonly ContentBlock[],
+  images: readonly ImageAttachmentRef[],
+): PromptPart[] {
+  const parts: PromptPart[] = []
+  let pending = ''
+  let taken = 0
+  const flush = (): void => {
+    if (pending.length === 0) return
+    parts.push({ kind: 'text', text: pending })
+    pending = ''
+  }
+  for (const block of prompt) {
+    if (block.type === 'image') {
+      const image = images[taken]
+      taken += 1
+      // 引用少于图片块只可能是调用方把两个序列配错了。丢掉一张图是静默的数据
+      // 损失（模型看到的问题里少了一张图，而它不知道），所以宁可炸。
+      if (image === undefined) throw new Error('image attachment refs are fewer than image blocks')
+      flush()
+      parts.push({ kind: 'image', image })
+      continue
+    }
+    pending += acpPromptToText([block])
+  }
+  flush()
+  return parts
 }

@@ -209,8 +209,23 @@ describe('prompt 输入校验（AC-G2）', () => {
     await expect(
       h.acp.request('session/prompt', {
         sessionId: s.sessionId,
-        prompt: [{ type: 'image', data: 'x', mimeType: 'image/png' }],
+        prompt: [{ type: 'audio', data: 'x', mimeType: 'audio/wav' }],
       }),
     ).rejects.toThrow(/embedded resource/i)
+  })
+
+  it('没挂附件服务时发图被拒，且说得清是为什么（AC-G2）', async () => {
+    // 这个 harness 不挂附件服务，于是 `promptCapabilities.image` 报 false。
+    // 关键是**拒绝的理由要指向缺席的那个服务**——早先这里报的是「只支持
+    // text / resource_link / embedded resource」，那句话读起来像「这个协议
+    // 不支持图片」，而真相是「这个部署没装」。
+    const h = await boot()
+    const s = await h.acp.request('session/new', { cwd: CWD, mcpServers: [] })
+    await expect(
+      h.acp.request('session/prompt', {
+        sessionId: s.sessionId,
+        prompt: [{ type: 'image', data: 'x', mimeType: 'image/png' }],
+      }),
+    ).rejects.toThrow(/attachment store/i)
   })
 })

@@ -37,6 +37,7 @@ import { isUserInvocable } from '@deepseek-ai/dsh-skill'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { ensurePiAi, loadPiAi } from '../composition/pi-ai.js'
+import { admitEncodedImages } from '@deepseek-ai/dsh-attachment'
 import * as McpClient from '@deepseek-ai/dsh-mcp-client'
 import * as FsTool from '@deepseek-ai/dsh-tool-fs'
 import { mountSessionFs, type ClientTextReader } from '../composition/session-fs.js'
@@ -46,8 +47,11 @@ import type { McpMountSpec } from '../mcp/spec.js'
 import type {
   AgentHandle,
   CommandPlane,
+  EncodedImage,
   HarnessPort,
+  ImagePlane,
   ModePlane,
+  PromptPart,
   ProviderPlane,
   SessionCatalog,
   SessionControls,
@@ -509,6 +513,31 @@ export function createInProcessPort(ctx: Context): HarnessPort {
           },
         }
 
+  // ── 图片输入面（US-23）──────────────────────────────────────────────
+  //
+  // 组合没挂附件服务时整面缺席，`promptCapabilities.image` 随之报 false。图片的
+  // 字节必须先落进内容寻址的附件库、消息里只留引用——把 base64 直接写进会话日志
+  // 会让一条日志涨到几十 MB，而恢复要把它整份读回来。
+  const attachments = ctx.get('attachments')
+  const images: ImagePlane | undefined =
+    attachments === undefined
+      ? undefined
+      : {
+          mediaTypes: [...attachments.imageLimits.mediaTypes],
+          async accepts(provider: string, model: string): Promise<boolean> {
+            // 走的是与上下文窗口同一份解析缓存，因此逐次问几乎不花钱。
+            return (await resolveModel(provider, model))?.inputModalities?.includes('image') === true
+          },
+          async admit(pending: readonly EncodedImage[]) {
+            // `admitEncodedImages` 是上游给「收浏览器上传」的 RPC 端点准备的共用
+            // 入口：它先对每一条强制规范 base64（URL-safe 别名、夹带空白都拒），
+            // 再把批次限额、media type 校验与顺序提交交给 `saveImages`。自己拼这
+            // 几步就是把一份已经写好的准入策略重抄一遍，而漏掉其中任何一步都不会
+            // 立刻显形。
+            return await admitEncodedImages(attachments, pending as never)
+          },
+        }
+
   // ── provider 配置面（ACP `providers/*`）─────────────────────────────
   //
   // 组合没挂设置服务、或挂了个只读的，整面缺席：能力位随之不 advertise。写不了
@@ -627,6 +656,7 @@ export function createInProcessPort(ctx: Context): HarnessPort {
     commands,
     skills,
     providers,
+    images,
     modes,
     sandboxModes: ctx.get('sandboxPolicy') === undefined ? [] : SANDBOX_MODES,
     listProviders() {
@@ -785,9 +815,14 @@ export function createInProcessPort(ctx: Context): HarnessPort {
     },
 
     driver: {
-      prepare(text: string) {
+      prepare(parts: readonly PromptPart[]) {
         const message = createUserMessage({
-          content: [{ type: 'text', text }],
+          // 按线序重建内容树。相邻的文本块在 codec 那层已经并好，这里只做映射。
+          content: parts.map((part) =>
+            part.kind === 'text'
+              ? ({ type: 'text', text: part.text } as const)
+              : ({ type: 'image', attachment: part.image } as const),
+          ),
           source: { kind: 'user' },
         })
         return {
