@@ -100,6 +100,7 @@ describe('TC-GUARD-02 断连即退出（无孤儿进程）', () => {
     const exit = await new Promise<{ code: number | null; ms: number; stderr: string }>((resolve, reject) => {
       const child = spawn(process.execPath, [BIN], { stdio: ['pipe', 'pipe', 'pipe'] })
       let stderr = ''
+      let stdout = ''
       child.stderr.on('data', (d: Buffer) => (stderr += d.toString()))
       child.on('error', reject)
 
@@ -109,7 +110,15 @@ describe('TC-GUARD-02 断连即退出（无孤儿进程）', () => {
 
       // 等它真正跑起来（组合装配完、watcher/定时器都已建立）再断开，
       // 否则测的是「还没来得及持有句柄」，抓不到回归。
-      setTimeout(() => {
+      //
+      // 就绪信号取 `initialize` 的**应答**而不是一个固定的 sleep：装配要花两三秒
+      // （多数时间在加载几十个上游插件），机器一忙就更久，而原先那个 1.2s 的
+      // 睡眠短于装配本身——于是断开落在装配中途，恰恰是上面那句注释说要避开的
+      // 情形，同时让这条用例的耗时随机器负载浮动。应答发出即证明组合已经就位。
+      child.stdout.on('data', (d: Buffer) => {
+        stdout += d.toString()
+        if (!stdout.includes('"protocolVersion"')) return
+        child.stdout.removeAllListeners('data')
         const t0 = Date.now()
         child.stdin.end()
         const orphan = setTimeout(() => {
@@ -120,7 +129,7 @@ describe('TC-GUARD-02 断连即退出（无孤儿进程）', () => {
           clearTimeout(orphan)
           resolve({ code, ms: Date.now() - t0, stderr })
         })
-      }, 1_200)
+      })
     })
 
     // code === null 表示只能靠 SIGKILL 收场 —— 编辑器场景下就是一个孤儿进程。

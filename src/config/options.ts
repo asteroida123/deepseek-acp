@@ -22,6 +22,7 @@ export const REASONING_OPTION = 'reasoning'
 /** 推理档位的展示名。词表由适配器给，这里只把已知 id 翻成中文。 */
 const REASONING_LABELS: Record<string, { name: string; description: string }> = {
   off: { name: '关闭', description: '不做推理，直接作答；最快' },
+  low: { name: '低', description: '略作推理；比关闭稳，比高档快' },
   high: { name: '高', description: '推理后作答；日常编码的默认档' },
   max: { name: '最高', description: '推理更久；难题更稳，但慢且更费 token' },
 }

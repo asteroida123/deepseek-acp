@@ -358,7 +358,10 @@ export function createInProcessPort(ctx: Context): HarnessPort {
             }))
           },
           async run(agent: Agent, line: string, signal: AbortSignal) {
-            const execution = await commandRuntime.execute(agent, line, signal)
+            // 第三个参数是随这一行命令提交的图片。恒空：ACP 的 prompt 目前只走文本
+            // （`promptCapabilities.image` 报 false），命令面自然也没有图片可带。
+            // 上游对空批次有专门的常量（`NO_ATTACHMENTS`），不会因此进入附件准入路径。
+            const execution = await commandRuntime.execute(agent, line, [], signal)
             // 语法不符或名字未注册 —— 上游此时什么都没记进日志，本就该当成普通文本。
             if (execution === undefined) return undefined
             return { ok: execution.result.kind === 'success', text: execution.result.text }
