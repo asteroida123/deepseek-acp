@@ -36,6 +36,10 @@ function credentialsText(home: string): string {
 
 const SECRET = 'sk-super-secret-value-do-not-leak'
 
+function createProviderHarness(home = realTempDir()) {
+  return createHarness({ settings: home, launchEnvironment: {} })
+}
+
 describe('TC-PROV-01 能力位跟着组合走', () => {
   it('没挂设置服务时不 advertise providers，且三个方法都拒绝', async () => {
     const h = await createHarness()
@@ -51,7 +55,7 @@ describe('TC-PROV-01 能力位跟着组合走', () => {
   }, 30_000)
 
   it('挂了可写设置服务就 advertise', async () => {
-    const h = await createHarness({ settings: realTempDir() })
+    const h = await createProviderHarness()
     const init = await h.acp.request('initialize', {
       protocolVersion: 1 as never,
       clientCapabilities: {} as never,
@@ -64,7 +68,7 @@ describe('TC-PROV-01 能力位跟着组合走', () => {
 describe('TC-PROV-02 列表不漏密钥', () => {
   it('providers/list 的应答里一个字节的密钥都没有', async () => {
     const home = realTempDir()
-    const h = await createHarness({ settings: home })
+    const h = await createProviderHarness(home)
     await h.acp.request('providers/set', {
       providerId: 'openai' as never,
       apiType: 'openai-completions' as never,
@@ -88,7 +92,7 @@ describe('TC-PROV-02 列表不漏密钥', () => {
   }, 30_000)
 
   it('未配置的 provider current 缺席 —— ACP 用它表示「已禁用」', async () => {
-    const h = await createHarness({ settings: realTempDir() })
+    const h = await createProviderHarness()
     const listed = await h.acp.request('providers/list', {} as never)
     const entries = listed.providers as { providerId: string; current?: unknown; required: boolean }[]
     // pi-ai 会把它内置目录里的每个 provider 都声明成可配置项，此时一条都还没配。
@@ -101,7 +105,7 @@ describe('TC-PROV-02 列表不漏密钥', () => {
 describe('TC-PROV-03 密钥落凭据文件而不是设置文档', () => {
   it('set 之后：设置文档只有引用名，凭据文档才有明文', async () => {
     const home = realTempDir()
-    const h = await createHarness({ settings: home })
+    const h = await createProviderHarness(home)
     await h.acp.request('providers/set', {
       providerId: 'openai' as never,
       apiType: 'openai-completions' as never,
@@ -124,7 +128,7 @@ describe('TC-PROV-03 密钥落凭据文件而不是设置文档', () => {
 
   it('不带授权头时不写凭据，路由照样配得上', async () => {
     const home = realTempDir()
-    const h = await createHarness({ settings: home })
+    const h = await createProviderHarness(home)
     await h.acp.request('providers/set', {
       providerId: 'openai' as never,
       apiType: 'openai-completions' as never,
@@ -139,7 +143,7 @@ describe('TC-PROV-03 密钥落凭据文件而不是设置文档', () => {
 describe('TC-PROV-04 禁用只删自己那一条', () => {
   it('disable 一个 provider 不会带走同段里另一个的配置', async () => {
     const home = realTempDir()
-    const h = await createHarness({ settings: home })
+    const h = await createProviderHarness(home)
     const set = async (id: string, url: string): Promise<void> => {
       await h.acp.request('providers/set', {
         providerId: id as never,
@@ -166,7 +170,7 @@ describe('TC-PROV-04 禁用只删自己那一条', () => {
   }, 30_000)
 
   it('required 的 provider 拒绝禁用 —— 静默成功会让用户以为生效了', async () => {
-    const h = await createHarness({ settings: realTempDir() })
+    const h = await createProviderHarness()
     const listed = await h.acp.request('providers/list', {} as never)
     const required = (listed.providers as { providerId: string; required: boolean }[]).find(
       (p) => p.required,
@@ -182,7 +186,7 @@ describe('TC-PROV-04 禁用只删自己那一条', () => {
 
 describe('TC-PROV-05 入参校验', () => {
   it('本 build 不认得的 apiType 当场拒绝', async () => {
-    const h = await createHarness({ settings: realTempDir() })
+    const h = await createProviderHarness()
     await expect(
       h.acp.request('providers/set', {
         providerId: 'openai' as never,
@@ -194,7 +198,7 @@ describe('TC-PROV-05 入参校验', () => {
   }, 30_000)
 
   it('空 baseUrl 拒绝 —— 它会被上游当成「继承目录默认」，与用户意图相反', async () => {
-    const h = await createHarness({ settings: realTempDir() })
+    const h = await createProviderHarness()
     await expect(
       h.acp.request('providers/set', {
         providerId: 'openai' as never,
@@ -206,7 +210,7 @@ describe('TC-PROV-05 入参校验', () => {
   }, 30_000)
 
   it('不可配置的 provider id 拒绝', async () => {
-    const h = await createHarness({ settings: realTempDir() })
+    const h = await createProviderHarness()
     await expect(
       h.acp.request('providers/set', {
         providerId: 'no-such-provider' as never,

@@ -6,6 +6,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
+import { join, resolve } from 'node:path'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { CallId } from '@deepseek-ai/dsh-llm'
 import type { ToolCallView, ToolResultView } from '@deepseek-ai/dsh-tools'
@@ -18,7 +19,10 @@ import { terminalCwd } from '../src/presentation/terminal.js'
 import { NO_TERMINAL, toolCallUpdate, toolResultUpdate } from '../src/presentation/tool-call.js'
 
 const CID = CallId('call-1')
-const WS = '/work/repo'
+const WS = resolve('work', 'repo')
+const FILE = join(WS, 'a.ts')
+const SOURCE_FILE = join(WS, 'src', 'a.ts')
+const OUTSIDE_FILE = resolve(WS, '..', 'other', 'hosts')
 const withTerminal = { enabled: true, cwd: WS }
 
 /** 一个只有 `get` 的最小注册表替身。 */
@@ -123,7 +127,7 @@ describe('TC-MAP-01 通用卡片', () => {
       title: 'Read a.ts',
       kind: 'read',
       rawInput: { path: 'a.ts' },
-      locations: [{ path: '/work/repo/a.ts', line: 12 }],
+      locations: [{ path: FILE, line: 12 }],
     }
     expect(toolCallUpdate(CID, view, withTerminal)).toEqual({
       sessionUpdate: 'tool_call',
@@ -132,7 +136,7 @@ describe('TC-MAP-01 通用卡片', () => {
       kind: 'read',
       status: 'in_progress',
       rawInput: { path: 'a.ts' },
-      locations: [{ path: '/work/repo/a.ts', line: 12 }],
+      locations: [{ path: FILE, line: 12 }],
     })
   })
 
@@ -147,23 +151,23 @@ describe('TC-MAP-02 diff 卡片（US-09）', () => {
     const view: ToolCallView = {
       card: 'diff',
       title: 'Write a.ts',
-      diffs: [{ path: '/work/repo/a.ts', oldText: null, newText: 'hi' }],
+      diffs: [{ path: FILE, oldText: null, newText: 'hi' }],
     }
     expect(toolCallUpdate(CID, view, withTerminal)).toMatchObject({
       kind: 'edit',
-      content: [{ type: 'diff', path: '/work/repo/a.ts', oldText: null, newText: 'hi' }],
+      content: [{ type: 'diff', path: FILE, oldText: null, newText: 'hi' }],
     })
   })
 
   it('结果侧同样发 diff —— 否则模型的结果文本会把 diff 冲掉', () => {
     const view: ToolResultView = {
       card: 'diff',
-      diffs: [{ path: '/work/repo/a.ts', oldText: 'a', newText: 'b' }],
+      diffs: [{ path: FILE, oldText: 'a', newText: 'b' }],
     }
     expect(toolResultUpdate(CID, view, false, withTerminal)).toMatchObject({
       sessionUpdate: 'tool_call_update',
       status: 'completed',
-      content: [{ type: 'diff', path: '/work/repo/a.ts', oldText: 'a', newText: 'b' }],
+      content: [{ type: 'diff', path: FILE, oldText: 'a', newText: 'b' }],
     })
   })
 })
@@ -179,7 +183,7 @@ describe('TC-MAP-03 终端卡片（US-10）', () => {
         { type: 'content', content: { type: 'text', text: '列目录' } },
         { type: 'terminal', terminalId: CID },
       ],
-      _meta: { terminal_info: { terminal_id: CID, cwd: '/work/repo/src' } },
+      _meta: { terminal_info: { terminal_id: CID, cwd: join(WS, 'src') } },
     })
   })
 
@@ -191,14 +195,14 @@ describe('TC-MAP-03 终端卡片（US-10）', () => {
 
   it('rawInput 是参数对象：命令 + 描述 + 解析后的 cwd，与 terminal_info 表头同源', () => {
     const update = toolCallUpdate(CID, call, withTerminal)
-    expect(update.rawInput).toEqual({ command: 'ls -la', description: '列目录', cwd: '/work/repo/src' })
+    expect(update.rawInput).toEqual({ command: 'ls -la', description: '列目录', cwd: join(WS, 'src') })
   })
 
   it('没有终端能力时 rawInput 照发 —— 那时 cwd 没有别的出路', () => {
     // 正是这条路径上的客户端最需要它：`_meta` 一个字节都不发，工作目录只剩这里。
     const update = toolCallUpdate(CID, call, { enabled: false, cwd: WS })
     expect(update).not.toHaveProperty('_meta')
-    expect(update.rawInput).toEqual({ command: 'ls -la', description: '列目录', cwd: '/work/repo/src' })
+    expect(update.rawInput).toEqual({ command: 'ls -la', description: '列目录', cwd: join(WS, 'src') })
   })
 
   it('描述与 cwd 都缺席时不塞空键 —— 客户端会把它们当成「有但为空」', () => {
@@ -243,8 +247,9 @@ describe('TC-MAP-03 终端卡片（US-10）', () => {
   })
 
   it('terminalCwd：绝对路径原样，相对路径按工作区解析，缺省用工作区', () => {
-    expect(terminalCwd('/abs', WS)).toBe('/abs')
-    expect(terminalCwd('sub', WS)).toBe('/work/repo/sub')
+    const absolute = resolve(WS, '..', 'abs')
+    expect(terminalCwd(absolute, WS)).toBe(absolute)
+    expect(terminalCwd('sub', WS)).toBe(join(WS, 'sub'))
     expect(terminalCwd(undefined, WS)).toBe(WS)
     expect(terminalCwd(undefined, undefined)).toBeUndefined()
   })
@@ -358,11 +363,11 @@ describe('TC-MAP-05 事件映射', () => {
 
 describe('TC-MAP-06 路径呈现', () => {
   it('标题里的工作区内绝对路径相对化', () => {
-    expect(displayTitle('Read /work/repo/src/a.ts', '/work/repo/src/a.ts', WS)).toBe('Read src/a.ts')
+    expect(displayTitle(`Read ${SOURCE_FILE}`, SOURCE_FILE, WS)).toBe(`Read ${join('src', 'a.ts')}`)
   })
 
   it('工作区外的路径保持绝对 —— 相对化会误导', () => {
-    expect(displayTitle('Read /etc/hosts', '/etc/hosts', WS)).toBe('Read /etc/hosts')
+    expect(displayTitle(`Read ${OUTSIDE_FILE}`, OUTSIDE_FILE, WS)).toBe(`Read ${OUTSIDE_FILE}`)
   })
 
   it('没有路径或没有工作区时原样', () => {
@@ -373,35 +378,35 @@ describe('TC-MAP-06 路径呈现', () => {
   it('locations 不相对化 —— 那是给编辑器定位用的，改了会静默跳不过去', () => {
     const update = toolCallUpdate(
       CID,
-      { card: 'generic', title: 'Read /work/repo/a.ts', locations: [{ path: '/work/repo/a.ts' }] },
+      { card: 'generic', title: `Read ${FILE}`, locations: [{ path: FILE }] },
       withTerminal,
     )
     expect(update.title).toBe('Read a.ts')
-    expect(update.locations).toEqual([{ path: '/work/repo/a.ts' }])
+    expect(update.locations).toEqual([{ path: FILE }])
   })
 
   it('结果卡的标题也相对化 —— 否则同一张卡完成时会换个写法', () => {
     const update = toolResultUpdate(
       CID,
-      { card: 'diff', title: 'Wrote /work/repo/a.ts', diffs: [{ path: '/work/repo/a.ts', oldText: null, newText: 'hi' }] },
+      { card: 'diff', title: `Wrote ${FILE}`, diffs: [{ path: FILE, oldText: null, newText: 'hi' }] },
       false,
       withTerminal,
     )
     // 标题给人看：相对。diff 的 path 给编辑器定位：绝对。
     expect(update.title).toBe('Wrote a.ts')
-    expect(update.content).toEqual([{ type: 'diff', path: '/work/repo/a.ts', oldText: null, newText: 'hi' }])
+    expect(update.content).toEqual([{ type: 'diff', path: FILE, oldText: null, newText: 'hi' }])
   })
 
   it('结果卡没给标题时不凭空造一个 —— 保留调用侧的标题', () => {
-    const update = toolResultUpdate(CID, { card: 'diff', diffs: [{ path: '/work/repo/a.ts', oldText: null, newText: 'hi' }] }, false, withTerminal)
+    const update = toolResultUpdate(CID, { card: 'diff', diffs: [{ path: FILE, oldText: null, newText: 'hi' }] }, false, withTerminal)
     expect(update).not.toHaveProperty('title')
   })
 
   it('insideWorkspace 边界', () => {
-    expect(insideWorkspace('/work/repo/a', WS)).toBe(true)
-    expect(insideWorkspace('/work/repo', WS)).toBe(false)
-    expect(insideWorkspace('/work/repo-other/a', WS)).toBe(false)
-    expect(insideWorkspace('/work/other', WS)).toBe(false)
+    expect(insideWorkspace(join(WS, 'a'), WS)).toBe(true)
+    expect(insideWorkspace(WS, WS)).toBe(false)
+    expect(insideWorkspace(join(`${WS}-other`, 'a'), WS)).toBe(false)
+    expect(insideWorkspace(resolve(WS, '..', 'other'), WS)).toBe(false)
   })
 })
 

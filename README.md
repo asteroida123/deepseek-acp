@@ -61,10 +61,15 @@ DeepSeek Harness 自带一个 ACP server（`@deepseek-ai/dsh-acp`），但它的
 | 多会话 | ✅ | ✅ |
 
 **沙箱。** 命令与文件操作同在一道围栏之下（默认 `workspace-write`，可写集是
-`{会话 cwd, /tmp, 系统临时目录}`），bash 与文件工具共用同一份定义。越界会被拒绝，
+`{会话 cwd, 系统临时目录}`），shell 与文件工具共用同一份定义。越界会被拒绝，
 模型可以就该次操作发起提权，提示走 `session/request_permission`。
 
-**内置工具**：`bash`、`read`、`write`、`edit`、`glob`、`grep`、`todo_write`、
+Windows 使用系统 PowerShell（优先 PowerShell 7，回退 Windows PowerShell 5.1），工具名为
+`pwsh`，不需要 Git Bash；Linux 与 macOS 使用 `bash`。Windows ACL 后端报告
+`enforcement: partial`：它限制常规 NTFS 写入，不限制读取、网络与进程可见性，也不承诺覆盖
+WSL、FAT、Everyone ACL 或硬链接边界；沙箱不可用时会拒绝执行，不会静默转成完全访问。
+
+**内置工具**：平台 shell（Windows 为 `pwsh`，Linux/macOS 为 `bash`）、`read`、`write`、`edit`、`glob`、`grep`、`todo_write`、
 `ask_user_question`、`exit_plan_mode`，以及**按机器现有情况**决定的 `lsp`（见下）。
 
 **上下文压缩。** 长会话撞到窗口上限时自动把较早的一段总结成一条替换消息，而不是让下一次

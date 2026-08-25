@@ -114,8 +114,8 @@ describe('TC-MODE-04 恢复', () => {
     const recorder = await createHarness({ sessionsRoot, planMode: true })
     const { sessionId } = await recorder.acp.request('session/new', { cwd, mcpServers: [] })
     await recorder.acp.request('session/set_mode', { sessionId, modeId: PLAN_MODE })
-    await recorder.waitPersisted(String(sessionId))
     recorder.disposeBridge()
+    await recorder.retire()
 
     const loader = await createHarness({ sessionsRoot, planMode: true })
     const seen = modeUpdates(loader)

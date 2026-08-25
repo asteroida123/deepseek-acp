@@ -8,11 +8,12 @@
 
 import { mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { describe, expect, it } from 'vitest'
 import { mapEvent } from '../src/mapping/updates.js'
 import { createHarness, waitFor, type CapturedUpdate, type TestHarness } from './harness.js'
+import { NATIVE_SHELL_TOOL, stdoutCommand } from './native-shell.js'
 
 function realTempDir(prefix: string): string {
   return realpathSync(mkdtempSync(join(tmpdir(), prefix)))
@@ -106,19 +107,59 @@ describe('TC-LOAD-01 历史重放', () => {
   it('工具卡片也一并重放 —— 恢复出来的转录不能少一段', async () => {
     const root = realTempDir('dsacp-load-')
     const cwd = realTempDir('dsacp-ws-')
+    const command = stdoutCommand('replayed')
     const { sessionId } = await recordSession(root, cwd, {
-      toolCall: { id: 'r-1', name: 'bash', args: JSON.stringify({ command: 'echo replayed', description: 'echo' }) },
+      toolCall: { id: 'r-1', name: NATIVE_SHELL_TOOL, args: JSON.stringify({ command, description: 'echo' }) },
     })
 
     const { h, raw } = await loadInto(root, sessionId, cwd, { terminal: true, shell: 'local' })
     const call = raw.find((u) => u['sessionUpdate'] === 'tool_call')
     const done = raw.find((u) => u['sessionUpdate'] === 'tool_call_update')
-    expect(call).toMatchObject({ toolCallId: 'r-1', title: 'echo replayed', kind: 'execute' })
+    expect(call).toMatchObject({ toolCallId: 'r-1', title: command, kind: 'execute' })
     // 呈现器是恢复时新建的：结果卡片能带上 diff/终端信息，说明它在重放里
     // 重新建立了 call→result 的关联，而不是退化成一张裸文本卡。
     expect((done?.['_meta'] as { terminal_output?: { data?: string } })?.terminal_output?.data).toContain('replayed')
     h.disposeBridge()
   }, 30_000)
+
+  it.skipIf(process.platform !== 'win32')('Windows 可恢复历史 bash 调用并在下一回合使用 pwsh', async () => {
+    const root = realTempDir('dsacp-load-legacy-')
+    const cwd = realTempDir('dsacp-ws-legacy-')
+    const { sessionId } = await recordSession(root, cwd, {
+      toolCall: {
+        id: 'legacy-bash',
+        name: 'bash',
+        args: JSON.stringify({ command: 'echo historical', description: 'historical shell call' }),
+      },
+    })
+
+    const { h, raw } = await loadInto(root, sessionId, cwd, { terminal: true, shell: 'local' })
+    const replayed = raw.find(
+      (u) => u['sessionUpdate'] === 'tool_call' && u['toolCallId'] === 'legacy-bash',
+    )
+    expect(replayed).toMatchObject({ toolCallId: 'legacy-bash', title: 'bash', kind: 'other' })
+    expect(replayed?.['rawInput']).toMatchObject({ command: 'echo historical' })
+
+    h.llm.toolCall = {
+      id: 'native-after-load',
+      name: NATIVE_SHELL_TOOL,
+      args: JSON.stringify({ command: stdoutCommand('continued'), description: 'continue with native shell' }),
+    }
+    await h.acp.request('session/prompt', {
+      sessionId: sessionId as never,
+      prompt: [{ type: 'text', text: '继续' }],
+    })
+    await waitFor(
+      () => raw.some((u) => u['sessionUpdate'] === 'tool_call_update' && u['toolCallId'] === 'native-after-load'),
+      20_000,
+      'native shell result after legacy load',
+    )
+    const continued = raw.find(
+      (u) => u['sessionUpdate'] === 'tool_call_update' && u['toolCallId'] === 'native-after-load',
+    )
+    expect(JSON.stringify(continued)).toContain('continued')
+    h.disposeBridge()
+  }, 60_000)
 })
 
 describe('TC-LOAD-02 恢复的校验', () => {
@@ -166,7 +207,7 @@ describe('TC-LIST-01 会话列表', () => {
     expect(ids).toContain(second.sessionId)
     expect(ids.indexOf(second.sessionId)).toBeLessThan(ids.indexOf(first.sessionId))
     // 每条都带绝对 cwd —— 客户端要靠它决定恢复到哪个工作区
-    for (const info of listed.sessions) expect(info.cwd.startsWith('/')).toBe(true)
+    for (const info of listed.sessions) expect(isAbsolute(info.cwd)).toBe(true)
     h.disposeBridge()
   }, 30_000)
 

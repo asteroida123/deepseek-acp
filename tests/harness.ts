@@ -17,8 +17,6 @@ import {
 } from '@agentclientprotocol/sdk'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import LocalBash from '@deepseek-ai/dsh-bash-local'
-import SandboxBash from '@deepseek-ai/dsh-bash-sandbox'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import PlanMode from '@deepseek-ai/dsh-plan-mode'
 import SessionProjections from '@deepseek-ai/dsh-session-projection'
@@ -28,6 +26,7 @@ import * as AskUserTool from '@deepseek-ai/dsh-tool-ask-user'
 import LlmService from '@deepseek-ai/dsh-llm'
 import LocalAttachments from '@deepseek-ai/dsh-attachment-local'
 import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
+import { createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import FileSettings from '@deepseek-ai/dsh-settings-file'
 import LocalSandbox from '@deepseek-ai/dsh-sandbox-local'
 import SandboxPolicy from '@deepseek-ai/dsh-sandbox-policy'
@@ -42,7 +41,6 @@ import * as ToolSkill from '@deepseek-ai/dsh-tool-skill'
 import SpillStore from '@deepseek-ai/dsh-spill'
 import LocalSubprocess from '@deepseek-ai/dsh-subprocess-local'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import * as BashTool from '@deepseek-ai/dsh-tool-bash'
 import ToolRegistry from '@deepseek-ai/dsh-tools'
 import { LocalFileSystem } from '@deepseek-ai/dsh-fs-local'
 import type {
@@ -55,6 +53,7 @@ import type {
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk'
 import { ensurePiAi } from '../src/composition/pi-ai.js'
+import { mountNativeShell, type NativeShellToolName } from '../src/composition/shell.js'
 import * as bridge from '../src/index.js'
 import { FAKE_MODEL, FAKE_PROVIDER, FAKE_PROVIDER_ALT, FakeLlmAdapter } from './fake-llm.js'
 
@@ -240,7 +239,7 @@ function pipePair(): { a: Stream; b: Stream } {
 /**
  * 引导组合、挂载 bridge、连接内存客户端。
  * @param options.config - 传给 bridge 的配置
- * @param options.shell - 挂上真实 `bash` 工具：`local` 无沙箱，`sandbox` 走
+ * @param options.shell - 挂上平台原生 shell 工具：`local` 无沙箱，`sandbox` 走
  *   部署真正用的那个 executor（要求平台有可用沙箱后端）
  * @param options.sessionsRoot - 挂 JSONL 持久化并落盘到此；缺省不挂持久化，
  *   于是 `session/load` / `session/list` 既不被 advertise 也不可用
@@ -263,6 +262,8 @@ export async function createHarness(
   options: {
     config?: bridge.AcpBridgeConfig
     shell?: 'local' | 'sandbox'
+    /** Explicit PowerShell executable for Windows executor compatibility tests. */
+    pwshPath?: string
     sessionsRoot?: string
     commands?: boolean
     planMode?: boolean
@@ -294,6 +295,8 @@ export async function createHarness(
      * 一个忘了隔离的用例会去改本机真正的 `~/.dsh/.credentials.yaml`。
      */
     settings?: string
+    /** Explicit inherited environment layer; useful for host-independent credential tests. */
+    launchEnvironment?: Readonly<Record<string, string>>
     /**
      * 挂附件服务（图片输入，US-23），对象库**关进这个目录**。
      *
@@ -306,6 +309,11 @@ export async function createHarness(
   } = {},
 ): Promise<TestHarness> {
   const ctx = new Context()
+  if (options.launchEnvironment !== undefined) {
+    ctx.provide('launchEnvironment', createLaunchEnvironmentSnapshot([
+      { source: 'process', values: options.launchEnvironment },
+    ]))
+  }
   const logs: CapturedLog[] = []
   // 装在挂任何插件**之前**：exporter 只对注册之后的记录生效，晚一步就漏掉装配期
   // 的告警——而装配期恰恰是最容易出事又最难看出来的那一段。
@@ -376,6 +384,7 @@ export async function createHarness(
   // 默认用 `local`：终端卡片那条链跟哪个 executor 无关，而沙箱后端要做平台
   // 探测、探测不到就 fail-closed——让全部用例都背上平台依赖换不来覆盖。只有
   // 明确要测拒绝/提权的用例才要 `sandbox`。
+  let mountedShell: NativeShellToolName | undefined
   if (options.shell !== undefined) {
     await ctx.plugin(SpillStore, [])
     // 只挂 `-local`：它继承 `dsh-subprocess` 并注册同一个服务，两个都挂会以
@@ -386,11 +395,12 @@ export async function createHarness(
       await ctx.plugin(LocalSandbox, {})
       // `read-only`：任何写都被拒，用来制造确定的拒绝与提权窗口。
       await ctx.plugin(SandboxPolicy, { mode: 'read-only' })
-      await ctx.plugin(SandboxBash, {})
-    } else {
-      await ctx.plugin(LocalBash, {})
     }
-    await ctx.plugin(BashTool, { enableRunInBackground: false })
+    mountedShell = await mountNativeShell(
+      ctx,
+      options.shell,
+      options.pwshPath === undefined ? {} : { pwshPath: options.pwshPath },
+    )
   }
   await waitFor(
     () =>
@@ -398,7 +408,7 @@ export async function createHarness(
       && ctx.tools !== undefined
       && ctx.sessions !== undefined
       && ctx.approval !== undefined
-      && (options.shell === undefined || ctx.tools.get('bash') !== undefined)
+      && (mountedShell === undefined || ctx.tools.get(mountedShell) !== undefined)
       && (options.commands !== true || ctx.get('commands') !== undefined)
       && (options.skills === undefined || ctx.get('skills') !== undefined)
       && (options.planMode !== true || ctx.get('planMode') !== undefined),
@@ -543,8 +553,14 @@ export async function createHarness(
       if (persistence === undefined) throw new Error('harness has no persistence mounted')
       const deadline = Date.now() + timeoutMs
       for (;;) {
-        const headers = await persistence.list()
-        if (headers.some((h) => String(h.id) === sessionId)) return
+        try {
+          const headers = await persistence.list()
+          if (headers.some((h) => String(h.id) === sessionId)) return
+        } catch (error: unknown) {
+          // The atomic directory publisher can expose its temporary directory
+          // to list() just before renaming it. Retry only that transient race.
+          if ((error as NodeJS.ErrnoException | null)?.code !== 'ENOENT') throw error
+        }
         if (Date.now() > deadline) throw new Error(`session ${sessionId} never persisted`)
         await new Promise((r) => setTimeout(r, 25))
       }

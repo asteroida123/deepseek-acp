@@ -13,8 +13,7 @@
  *     用户则以为自己的历史被删了。
  */
 
-import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -28,6 +27,18 @@ import { createHarness, waitFor } from './harness.js'
 
 function realTempDir(prefix: string): string {
   return realpathSync(mkdtempSync(join(tmpdir(), prefix)))
+}
+
+function findSessionLog(root: string): string | undefined {
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const path = join(root, entry.name)
+    if (entry.isFile() && entry.name === 'session.jsonl') return path
+    if (entry.isDirectory()) {
+      const nested = findSessionLog(path)
+      if (nested !== undefined) return nested
+    }
+  }
+  return undefined
 }
 
 /** 一个格式合法、但从未存在过的会话 id。 */
@@ -235,11 +246,12 @@ describe('TC-MISSING-03 别的失败不受影响', () => {
     const cwd = realTempDir('dsacp-ws-')
     const sessionId = await record(root, cwd)
 
-    const log = execFileSync('find', [root, '-name', 'session.jsonl']).toString().trim().split('\n')[0]
-    expect(log, '录出来的日志应当能找到').toBeTruthy()
-    const lines = readFileSync(log as string, 'utf8').split('\n')
+    const log = findSessionLog(root)
+    expect(log, '录出来的日志应当能找到').toBeDefined()
+    if (log === undefined) throw new Error('录出来的日志未找到')
+    const lines = readFileSync(log, 'utf8').split('\n')
     // 只弄坏头部行，事件行原样保留：文件确实还在，只是读不出来。
-    writeFileSync(log as string, ['{ 这一行不是 JSON', ...lines.slice(1)].join('\n'))
+    writeFileSync(log, ['{ 这一行不是 JSON', ...lines.slice(1)].join('\n'))
 
     const h = await createHarness({ sessionsRoot: root })
     const fail = await failure(async () =>

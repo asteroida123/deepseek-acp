@@ -29,8 +29,8 @@ const REASONING_LABELS: Record<string, { name: string; description: string }> = 
 
 /** 沙箱模式的展示名与说明。用户看到的是后果，不是词表里的字面量。 */
 const SANDBOX_LABELS: Record<string, { name: string; description: string }> = {
-  'read-only': { name: '只读', description: '不允许任何写操作；越界的命令会被拒绝' },
-  'workspace-write': { name: '可写工作区', description: '可读写会话工作区与 /tmp；越界需要单次授权' },
+  'read-only': { name: '只读', description: '按只读策略执行；需要写入时应切换权限' },
+  'workspace-write': { name: '可写工作区', description: '可写会话工作区与系统临时目录；越界需要单次授权' },
   'danger-full-access': { name: '完全访问', description: '不做任何文件限制。仅在你清楚后果时选择' },
 }
 

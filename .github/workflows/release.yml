@@ -18,9 +18,28 @@ permissions:
   contents: write # 建 GitHub Release
 
 jobs:
+  verify-windows:
+    name: Windows 发布门禁
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm.cmd ci
+      - run: npm.cmd run typecheck
+      - run: npm.cmd run build
+      - run: npm.cmd test
+
   publish:
     name: 发布到 npm
-    # 发布产物是平台无关的（TS 编译出的 JS），选 macOS 只为**测试闸门**：
+    needs: verify-windows
+    # 发布产物是平台无关的（TS 编译出的 JS）；Windows 已由上面的前置任务把关，
+    # 发布任务自身选 macOS 作为第二道**测试闸门**：
     # 沙箱用例在 macOS 上走系统自带的 Seatbelt，是本项目验证过的路径；
     # Linux 要另装 bwrap 且受 runner 的 user namespace 策略影响。CI 那条
     # 工作流仍然覆盖 ubuntu——发布不该因为某个平台的沙箱后端而卡住。

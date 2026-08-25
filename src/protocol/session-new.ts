@@ -18,7 +18,7 @@ import { optionsFor } from './session-config.js'
 /**
  * 校验 M1-a 契约之外的会话特性。
  *
- * `cwd` 是会话工作区，同时是 sandbox / bash / fs 的解析根，因此必须是绝对
+ * `cwd` 是会话工作区，同时是 sandbox / shell / fs 的解析根，因此必须是绝对
  * 路径——相对路径会静默跑在启动目录下。
  */
 function validate(params: NewSessionRequest): void {

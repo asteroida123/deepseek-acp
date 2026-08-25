@@ -6,6 +6,7 @@
  */
 
 import { spawn } from 'node:child_process'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { AGENT_INFO } from '../src/protocol/initialize.js'
@@ -84,7 +85,7 @@ describe('TC-GUARD-03 启动不卡死', () => {
     })
 
     // **这里不断言延迟。** 曾经写过 `toBeLessThan(3000)`，但整个套件是并行跑的，
-    // 同时有一堆用例在起 bash 子进程和探测沙箱：单独跑 ~0.8s，满载时 4.7s。一个
+    // 同时有一堆用例在起 shell 子进程和探测沙箱：单独跑 ~0.8s，满载时 4.7s。一个
     // 会被套件自身负载左右的计时断言分不清「劣化」与「机器忙」，只会长期随机
     // 失败，然后被所有人无视。
     //
@@ -141,7 +142,7 @@ describe('TC-GUARD-01 stdout 纯净性', () => {
   it('stdout 的每一行都是可解析的 JSON-RPC 帧', async () => {
     const run = await runBin([
       { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {} } },
-      { jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: '/tmp', mcpServers: [] } },
+      { jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: tmpdir(), mcpServers: [] } },
     ])
 
     const lines = run.stdout.split('\n').filter((l) => l.trim().length > 0)

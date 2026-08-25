@@ -19,12 +19,13 @@ function realTempDir(prefix = 'dsacp-life-'): string {
   return realpathSync(mkdtempSync(join(tmpdir(), prefix)))
 }
 
-/** 建一个会话、跑一轮、等它落盘，返回可供恢复的 id 与 cwd。 */
+/** 建一个会话、跑一轮并完全退休录制端，返回可供恢复的 id 与 cwd。 */
 async function persistedSession(h: TestHarness): Promise<{ sessionId: string; cwd: string }> {
   const cwd = realTempDir()
   const { sessionId } = await h.acp.request('session/new', { cwd, mcpServers: [] })
   await h.acp.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: '你好' }] })
-  await h.waitPersisted(String(sessionId))
+  h.disposeBridge()
+  await h.retire()
   return { sessionId: String(sessionId), cwd }
 }
 
@@ -99,7 +100,6 @@ describe('TC-RESUME-01 恢复但不回放', () => {
     const root = realTempDir('dsacp-resume-root-')
     const first = await createHarness({ sessionsRoot: root })
     const { sessionId, cwd } = await persistedSession(first)
-    first.disposeBridge()
 
     // 换一条连接恢复，与真实的「重开编辑器」一致。
     const resumed = await createHarness({ sessionsRoot: root })
@@ -107,6 +107,7 @@ describe('TC-RESUME-01 恢复但不回放', () => {
     const afterResume = resumed.updates.filter((u) => u.kind.endsWith('_message_chunk')).length
     expect(afterResume).toBe(0)
     resumed.disposeBridge()
+    await resumed.retire()
 
     const loaded = await createHarness({ sessionsRoot: root })
     await loaded.acp.request('session/load', { sessionId, cwd, mcpServers: [] })
@@ -120,7 +121,6 @@ describe('TC-RESUME-01 恢复但不回放', () => {
     const root = realTempDir('dsacp-resume-live-')
     const first = await createHarness({ sessionsRoot: root })
     const { sessionId, cwd } = await persistedSession(first)
-    first.disposeBridge()
 
     const h = await createHarness({ sessionsRoot: root })
     await h.acp.request('session/resume', { sessionId, cwd, mcpServers: [] })
@@ -151,7 +151,6 @@ describe('TC-RESUME-01 恢复但不回放', () => {
     const root = realTempDir('dsacp-resume-cwd-')
     const first = await createHarness({ sessionsRoot: root })
     const { sessionId } = await persistedSession(first)
-    first.disposeBridge()
 
     const h = await createHarness({ sessionsRoot: root })
     await expect(

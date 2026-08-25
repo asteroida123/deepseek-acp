@@ -1,7 +1,7 @@
 /**
  * TC-TERM-* —— 终端卡片的端到端（US-10）。
  *
- * 这里跑的是**真实的 bash 子进程**：真实工具 → 真实执行 → 真实 `tool/result`
+ * 这里跑的是**真实的平台 shell 子进程**：真实工具 → 真实执行 → 真实 `tool/result`
  * → 呈现器 → ACP 帧。`presentation.spec.ts` 那一批是纯函数，手写的视图对象只
  * 能证明映射自洽，证明不了上游工具真的产出那种视图。
  *
@@ -15,6 +15,12 @@ import { join } from 'node:path'
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { describe, expect, it } from 'vitest'
 import { createHarness, waitFor, type TestHarness } from './harness.js'
+import {
+  NATIVE_SHELL_TOOL,
+  cwdCommand,
+  stderrAndExitCommand,
+  stdoutCommand,
+} from './native-shell.js'
 
 /** 真实临时目录；macOS 的 /tmp 是软链，`pwd` 会打印 /private/tmp。 */
 function realTempDir(): string {
@@ -54,7 +60,7 @@ async function runCommand(
 
   h.llm.toolCall = {
     id: 'term-1',
-    name: 'bash',
+    name: NATIVE_SHELL_TOOL,
     args: JSON.stringify({
       command: options.command,
       description: options.description ?? 'run a command',
@@ -77,14 +83,15 @@ describe('TC-TERM-01 支持终端的客户端拿到终端卡片', () => {
   it('调用侧：命令作标题、execute 卡、terminal 内容块、terminal_info 带 cwd', async () => {
     const h = await createHarness({ shell: 'local' })
     const cwd = realTempDir()
+    const command = stdoutCommand('hello-terminal')
     const { call } = await runCommand(h, {
-      command: 'echo hello-terminal',
+      command,
       description: '打个招呼',
       cwd,
       terminal: true,
     })
 
-    expect(call.title).toBe('echo hello-terminal')
+    expect(call.title).toBe(command)
     expect(call.kind).toBe('execute')
     expect(call.status).toBe('in_progress')
     // 描述在终端块**之前** —— 终端卡片本身没有描述槽位
@@ -94,14 +101,14 @@ describe('TC-TERM-01 支持终端的客户端拿到终端卡片', () => {
     ])
     expect(call._meta?.terminal_info).toEqual({ terminal_id: 'term-1', cwd })
     // 入参对象与表头同源：cwd 两处必须是同一个值
-    expect(call.rawInput).toEqual({ command: 'echo hello-terminal', description: '打个招呼', cwd })
+    expect(call.rawInput).toEqual({ command, description: '打个招呼', cwd })
     h.disposeBridge()
   }, 30_000)
 
   it('结果侧：真实 stdout 走 _meta.terminal_output.data，退出码进 terminal_exit', async () => {
     const h = await createHarness({ shell: 'local' })
     const { result } = await runCommand(h, {
-      command: 'echo hello-terminal',
+      command: stdoutCommand('hello-terminal'),
       cwd: realTempDir(),
       terminal: true,
     })
@@ -121,7 +128,7 @@ describe('TC-TERM-02 非零退出', () => {
   it('退出码进 pill，卡片仍是 completed —— 非零退出是模型要读的结果，不是工具故障', async () => {
     const h = await createHarness({ shell: 'local' })
     const { result } = await runCommand(h, {
-      command: 'echo oops >&2; exit 3',
+      command: stderrAndExitCommand('oops', 3),
       cwd: realTempDir(),
       terminal: true,
     })
@@ -136,8 +143,9 @@ describe('TC-TERM-03 不支持终端的客户端', () => {
   it('退回围栏 console 文本，且完全不发 _meta', async () => {
     const h = await createHarness({ shell: 'local' })
     const cwd = realTempDir()
+    const command = stdoutCommand('plain-fallback')
     const { call, result } = await runCommand(h, {
-      command: 'echo plain-fallback',
+      command,
       description: '打个招呼',
       cwd,
       terminal: false,
@@ -147,7 +155,7 @@ describe('TC-TERM-03 不支持终端的客户端', () => {
     expect(call).not.toHaveProperty('_meta')
     expect(call.content).toEqual([{ type: 'content', content: { type: 'text', text: '打个招呼' } }])
     // 这条路径上没有 `terminal_info` 表头，工作目录只能从入参对象里读
-    expect(call.rawInput).toEqual({ command: 'echo plain-fallback', description: '打个招呼', cwd })
+    expect(call.rawInput).toEqual({ command, description: '打个招呼', cwd })
 
     expect(result).not.toHaveProperty('_meta')
     const text = (result.content?.[0] as { content?: { text?: string } })?.content?.text ?? ''
@@ -161,7 +169,7 @@ describe('TC-TERM-04 工作目录', () => {
   it('未给 workdir 时命令跑在会话 cwd 里', async () => {
     const h = await createHarness({ shell: 'local' })
     const cwd = realTempDir()
-    const { result } = await runCommand(h, { command: 'pwd', cwd, terminal: true })
+    const { result } = await runCommand(h, { command: cwdCommand(), cwd, terminal: true })
 
     // 这条同时钉住两件事：cwd 表头没有说谎，且 N 个会话共用一个 executor 时
     // 每个会话跑在自己的工作区里（工具层从 session.header.cwd 取默认 workdir）。

@@ -4,8 +4,9 @@
  * 断的是 `composeAgent`（不是 `boot`）：后者会把 bridge 接到真的 stdio 上，
  * 进程内测试碰它就等于抢走 `process.stdin`。
  *
- * 这一批与 harness 里那套是互补的：harness 挂 `bash-local`，让终端卡片的用例
- * 不背平台依赖；**部署真正用的是 `bash-sandbox`**，那个差别只有这里能抓到。
+ * 这一批与 harness 里那套是互补的：harness 挂平台的 local executor，让终端
+ * 卡片用例不背沙箱依赖；**部署真正用的是 sandbox executor**，那个差别只有
+ * 这里能抓到。
  * 沙箱后端不可用的平台上这些用例会失败——那是对的，组合在那种平台上本来就
  * 起不来，静默降级成无约束执行才是坏结果。
  */
@@ -21,6 +22,8 @@ import { describe, expect, it } from 'vitest'
 import { PLAN_SECTION, composeAgent, installStderrLog } from '../src/launcher/boot.js'
 import { createInProcessPort } from '../src/port/in-process.js'
 import { waitFor } from './harness.js'
+import { NATIVE_SHELL_TOOL } from './native-shell.js'
+import { nativeShellToolName } from '../src/composition/shell.js'
 
 /**
  * 全文件共用一个组合。
@@ -35,7 +38,7 @@ function composed(): Promise<Context> {
     const ctx = new Context()
     // 会话根用临时目录：别把用例跑出来的日志写进用户的 ~/.dsh。
     await composeAgent(ctx, { sessionsRoot: mkdtempSync(join(tmpdir(), 'dsacp-comp-')) })
-    await waitFor(() => ctx.tools?.get('bash') !== undefined, 10_000, 'composed tools')
+    await waitFor(() => ctx.tools?.get(NATIVE_SHELL_TOOL) !== undefined, 10_000, 'composed tools')
     return ctx
   })()
   return shared
@@ -69,10 +72,18 @@ function scoped(): Promise<{ ctx: Context; agent: Agent }> {
 describe('TC-COMP-01 工具集', () => {
   it('全局作用域挂上了 M1-b 承诺的工具', async () => {
     const ctx = await composed()
-    for (const name of ['bash', 'glob', 'grep', 'todo_write']) {
+    for (const name of [NATIVE_SHELL_TOOL, 'glob', 'grep', 'todo_write']) {
       expect(ctx.tools.get(name), `缺少工具 ${name}`).toBeDefined()
     }
+    const foreignShell = NATIVE_SHELL_TOOL === 'pwsh' ? 'bash' : 'pwsh'
+    expect(ctx.tools.get(foreignShell), `不应同时注册 ${foreignShell}`).toBeUndefined()
   }, 30_000)
+
+  it('平台到 shell 方言的映射固定', () => {
+    expect(nativeShellToolName('win32')).toBe('pwsh')
+    expect(nativeShellToolName('linux')).toBe('bash')
+    expect(nativeShellToolName('darwin')).toBe('bash')
+  })
 
   it('文件工具在会话作用域里 —— 模型看得到，全局视角看不到', async () => {
     const { ctx, agent } = await scoped()
@@ -153,7 +164,7 @@ describe('TC-COMP-05 文件工具在沙箱之下', () => {
     expect(ctx.fs.sandboxMode).toBe('workspace-write')
   }, 30_000)
 
-  it('write / edit 都 advertise 了提权参数 —— 与 bash 同一条边界', async () => {
+  it('write / edit 都 advertise 了提权参数 —— 与 shell 同一条边界', async () => {
     const { ctx, agent } = await scoped()
     // 这两个字段是「本工具受约束」的可观测证据：`tool-fs` 只在后端确实约束时
     // 才生成它们。少了它们，模型连「这次越界，请授权」都表达不了。
@@ -177,23 +188,23 @@ describe('TC-COMP-05 文件工具在沙箱之下', () => {
 describe('TC-COMP-02 shell 在沙箱之下', () => {
   it('executor 报告 workspace-write —— 与文件工具同一条边界', async () => {
     const ctx = await composed()
-    // `sandboxMode` 是「这个 executor 会约束执行」的能力事实：`bash-local`
-    // 报 undefined，`bash-sandbox` 报配置的默认模式。工具层也靠它决定要不要
+    // `sandboxMode` 是「这个 executor 会约束执行」的能力事实：local executor
+    // 报 undefined，sandbox executor 报配置的默认模式。工具层也靠它决定要不要
     // 给模型 `sandbox_permissions` 这个提权参数。
     expect(ctx.shell.sandboxMode).toBe('workspace-write')
   }, 30_000)
 
   it('提权参数已 advertise，模型可以就越界命令发起授权', async () => {
     const ctx = await composed()
-    const params = ctx.tools.get('bash')?.parameters as { properties?: Record<string, unknown> }
+    const params = ctx.tools.get(NATIVE_SHELL_TOOL)?.parameters as { properties?: Record<string, unknown> }
     expect(Object.keys(params.properties ?? {})).toContain('sandbox_permissions')
   }, 30_000)
 })
 
 describe('TC-COMP-03 后台任务关闭', () => {
-  it('bash schema 里没有 run_in_background —— ACP 下自发回合无处归属', async () => {
+  it('shell schema 里没有 run_in_background —— ACP 下自发回合无处归属', async () => {
     const ctx = await composed()
-    const params = ctx.tools.get('bash')?.parameters as { properties?: Record<string, unknown> }
+    const params = ctx.tools.get(NATIVE_SHELL_TOOL)?.parameters as { properties?: Record<string, unknown> }
     // 关掉不只是「不用」：留着 schema 而在执行时拒绝，模型会反复尝试并把
     // 失败当成自己参数写错。
     expect(Object.keys(params.properties ?? {})).not.toContain('run_in_background')

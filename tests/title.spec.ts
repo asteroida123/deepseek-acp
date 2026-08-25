@@ -82,8 +82,8 @@ describe('TC-TITLE-02 恢复与列表', () => {
       sessionId,
       prompt: [{ type: 'text', text: '修复登录页的 CSRF 校验' }],
     })
-    await recorder.waitPersisted(String(sessionId))
     recorder.disposeBridge()
+    await recorder.retire()
 
     const loader = await createHarness({ sessionsRoot, title: true })
     const seen = titleUpdates(loader)
@@ -104,8 +104,8 @@ describe('TC-TITLE-02 恢复与列表', () => {
       sessionId,
       prompt: [{ type: 'text', text: '把缓存换成 Redis' }],
     })
-    await recorder.waitPersisted(String(sessionId))
     recorder.disposeBridge()
+    await recorder.retire()
 
     const reader = await createHarness({ sessionsRoot, title: true })
     const listed = await reader.acp.request('session/list', {})

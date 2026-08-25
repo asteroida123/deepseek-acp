@@ -21,14 +21,22 @@ import { LSP_SERVERS_ENV, discoverLspServers } from '../src/composition/lsp.js'
 import { composeAgent } from '../src/launcher/boot.js'
 import { createInProcessPort } from '../src/port/in-process.js'
 import { waitFor } from './harness.js'
+import { NATIVE_SHELL_TOOL } from './native-shell.js'
+
+function fakeExecutablePath(dir: string, command: string): string {
+  return join(dir, process.platform === 'win32' ? `${command}.CMD` : command)
+}
 
 /** 造一个只含指定命令的 PATH 目录，返回目录路径。 */
 function fakeBinDir(commands: readonly string[]): string {
   const dir = mkdtempSync(join(tmpdir(), 'dsacp-bin-'))
   for (const command of commands) {
-    const file = join(dir, command)
-    writeFileSync(file, '#!/bin/sh\nexit 0\n')
-    chmodSync(file, 0o755)
+    const file = fakeExecutablePath(dir, command)
+    if (process.platform === 'win32') writeFileSync(file, '@exit /b 0\r\n')
+    else {
+      writeFileSync(file, '#!/bin/sh\nexit 0\n')
+      chmodSync(file, 0o755)
+    }
   }
   return dir
 }
@@ -59,17 +67,17 @@ describe('TC-LSP-01 按 PATH 筛候选', () => {
     const servers = await discoverLspServers({ PATH: dir })
     const command = servers?.['rust']?.command ?? ''
     expect(isAbsolute(command)).toBe(true)
-    expect(command).toBe(join(dir, 'rust-analyzer'))
+    expect(command).toBe(fakeExecutablePath(dir, 'rust-analyzer'))
   })
 
   it('PATH 上有多个目录时按顺序取第一个命中的', async () => {
     const first = fakeBinDir(['gopls'])
     const second = fakeBinDir(['gopls'])
     const servers = await discoverLspServers({ PATH: [first, second].join(delimiter) })
-    expect(servers?.['go']?.command).toBe(join(first, 'gopls'))
+    expect(servers?.['go']?.command).toBe(fakeExecutablePath(first, 'gopls'))
   })
 
-  it('存在但不可执行的文件不算数', async () => {
+  it.skipIf(process.platform === 'win32')('存在但不可执行的文件不算数', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsacp-bin-'))
     writeFileSync(join(dir, 'gopls'), 'not executable')
     chmodSync(join(dir, 'gopls'), 0o644)
@@ -134,7 +142,7 @@ describe('TC-LSP-03 组合', () => {
       sessionsRoot: mkdtempSync(join(tmpdir(), 'dsacp-lsp-')),
       ...(lspServers === undefined ? {} : { lspServers }),
     })
-    await waitFor(() => ctx.tools?.get('bash') !== undefined, 15_000, 'composed tools')
+    await waitFor(() => ctx.tools?.get(NATIVE_SHELL_TOOL) !== undefined, 15_000, 'composed tools')
     const handle = await createInProcessPort(ctx).sessions.create({
       sessionId: SessionId('tc-lsp'),
       cwd: mkdtempSync(join(tmpdir(), 'dsacp-lsp-cwd-')),
@@ -151,7 +159,7 @@ describe('TC-LSP-03 组合', () => {
     const dir = fakeBinDir(['fake-server'])
     const { ctx } = await composedWith({
       fake: {
-        command: join(dir, 'fake-server'),
+        command: fakeExecutablePath(dir, 'fake-server'),
         extensionToLanguage: { '.q': 'q' },
       },
     } as never)

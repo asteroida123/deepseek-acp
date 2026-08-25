@@ -16,6 +16,7 @@ import { MODEL_OPTION, SANDBOX_OPTION, configOptions, decodeRouteValue } from '.
 import type { SessionControls } from '../src/port/types.js'
 import { FAKE_MODEL, FAKE_MODEL_ALT, FAKE_PROVIDER, FAKE_PROVIDER_ALT } from './fake-llm.js'
 import { createHarness, waitFor } from './harness.js'
+import { NATIVE_SHELL_TOOL, writeFileCommand } from './native-shell.js'
 
 function realTempDir(prefix = 'dsacp-cfg-'): string {
   return realpathSync(mkdtempSync(join(tmpdir(), prefix)))
@@ -73,8 +74,8 @@ describe('TC-CFG-01 权限预设（US-17）', () => {
       h.onUpdate((u) => raw.push(u as Record<string, unknown>))
       h.llm.toolCall = {
         id: callId,
-        name: 'bash',
-        args: JSON.stringify({ command: `echo ok > ${callId}.txt`, description: 'write a file' }),
+        name: NATIVE_SHELL_TOOL,
+        args: JSON.stringify({ command: writeFileCommand(`${callId}.txt`, 'ok'), description: 'write a file' }),
       }
       await h.acp.request('session/prompt', {
         sessionId: sessionId as never,
@@ -138,7 +139,7 @@ describe('TC-CFG-01 权限预设（US-17）', () => {
     // 得先有内容才会落盘（懒物化）；设置本身就产生了一条 sandbox/mode 事件
     rec.disposeBridge()
     await waitFor(() => !rec.hasAgent(String(sessionId)), 5_000, 'teardown')
-    await rec.waitPersisted(String(sessionId))
+    await rec.retire()
 
     const loader = await createHarness({ shell: 'sandbox', sessionsRoot: root })
     const loaded = await loader.acp.request('session/load', {

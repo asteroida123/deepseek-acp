@@ -103,8 +103,8 @@ describe('TC-CMD-01 命令目录', () => {
       sessionId,
       prompt: [{ type: 'text', text: '你好' }],
     })
-    await recorder.waitPersisted(String(sessionId))
     recorder.disposeBridge()
+    await recorder.retire()
 
     const loader = await createHarness({ sessionsRoot, planMode: true })
     const seen = snapshots(loader)

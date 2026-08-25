@@ -12,7 +12,6 @@ import AgentRegistry from '@deepseek-ai/dsh-agent'
 import LocalAttachments from '@deepseek-ai/dsh-attachment-local'
 import * as AgentInstructions from '@deepseek-ai/dsh-agent-instructions'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import SandboxBash from '@deepseek-ai/dsh-bash-sandbox'
 import * as CompactCommand from '@deepseek-ai/dsh-command-compact'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import BasicCompaction from '@deepseek-ai/dsh-compaction-basic'
@@ -37,7 +36,6 @@ import SpillStore from '@deepseek-ai/dsh-spill'
 import LocalSubprocess from '@deepseek-ai/dsh-subprocess-local'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import * as AskUserTool from '@deepseek-ai/dsh-tool-ask-user'
-import * as BashTool from '@deepseek-ai/dsh-tool-bash'
 import * as FsSearchTool from '@deepseek-ai/dsh-tool-fs-search'
 import * as ToolSkill from '@deepseek-ai/dsh-tool-skill'
 import * as TodoTool from '@deepseek-ai/dsh-tool-todo'
@@ -47,6 +45,7 @@ import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import UserQuestions from '@deepseek-ai/dsh-user-questions'
 import { composeLsp, discoverLspServers, type LspServerSpec } from '../composition/lsp.js'
 import { ensurePiAi, settingsMentionsPiAi } from '../composition/pi-ai.js'
+import { mountNativeShell } from '../composition/shell.js'
 import * as acpBridge from '../index.js'
 import { installToolCallStreamGuard } from './tool-call-stream-guard.js'
 
@@ -57,8 +56,8 @@ import { installToolCallStreamGuard } from './tool-call-stream-guard.js'
  * （`harness:identity`，order -100）已经声明「你是 DeepSeek Harness 驱动的
  * agent」。这里补的是**这个部署**是什么：一个跑在编辑器里的编码助手。
  *
- * 不复述任何工具的用法：每个工具自己贡献 schema 与提示段（`bash` 还自带
- * `tool:bash` 一段讲退出码），沙箱模式则由 `sandbox-policy` 贡献。在这里重写
+ * 不复述任何工具的用法：每个工具自己贡献 schema 与提示段（平台 shell 还自带
+ * 一段讲退出码），沙箱模式则由 `sandbox-policy` 贡献。在这里重写
  * 一遍只会多花 token，且会在上游改了行为时变成过时的错误说明。
  */
 const PERSONA = [
@@ -177,11 +176,11 @@ export async function composeAgent(
   await ctx.plugin(SandboxPolicy, { mode: 'workspace-write' })
   // 文件系统 seam：`agent-instructions` 用它读 AGENTS.md，不注册任何工具。
   //
-  // **`fs-sandbox` 而非 `fs-local`**，理由与 bash 那边同构且更硬：`tool-fs` 是
+  // **`fs-sandbox` 而非 `fs-local`**，理由与 shell 那边同构且更硬：`tool-fs` 是
   // 拿 `ctx.fs.sandboxMode` 决定要不要执行策略的，而 `LocalFileSystem` 报
   // `undefined`（它自己的文档写明 cwd 只是解析默认值、**不是** containment
   // 边界）。挂它等于 `write` / `edit` 全程无约束，同时「文件权限」那个配置项
-  // 只管得住 bash——一个只拦得住一半的边界比没有边界更坏，因为它看起来是有的。
+  // 只管得住 shell——一个只拦得住一半的边界比没有边界更坏，因为它看起来是有的。
   // 这个缺口实测复现过：`workspace-write` 下 `write` 把文件写到了工作区之外。
   await ctx.plugin(SandboxedFileSystem, {})
   // 从会话 cwd 向上找到项目根（标记 `.git`），加载 AGENTS.md / CLAUDE.md
@@ -220,7 +219,7 @@ export async function composeAgent(
   // 只挂 seam 也不行：那种组合装配得起来，直到第一条命令执行才炸
   // `this.ctx.subprocess.spawn is not a function`。
   await ctx.plugin(LocalSubprocess)
-  // 沙箱后端与策略已在文件系统之前挂好（见上），bash 与 fs 共用同一份。
+  // 沙箱后端与策略已在文件系统之前挂好（见上），shell 与 fs 共用同一份。
 
   // `allowParallelInProgress: false` —— 同时只有一项进行中。ACP 的 plan 面板
   // 是给人看进度的，一次亮起五项等于没有进度。
@@ -264,16 +263,15 @@ export async function composeAgent(
   await ctx.plugin(ToolSkill, {})
 
   // ── shell ───────────────────────────────────────────────────────────
-  // `bash-sandbox` 而非 `bash-local`：文件工具已经在 `workspace-write` 之下，
-  // 让 bash 无约束地跑就等于给了一条绕过它的路——`sh -c 'echo > /etc/hosts'`
+  // 沙箱 executor 而非 local executor：文件工具已经在 `workspace-write` 之下，
+  // 让 shell 无约束地跑就等于给了一条绕过文件边界的路，
   // 比 `write` 更危险，边界却更松，这种不一致没有道理。
   await ctx.plugin(ShellEnv, {})
-  await ctx.plugin(SandboxBash, {})
   // `enableRunInBackground: false` —— 后台任务在 ACP 下没有落点：完成通知会给
   // 空闲 agent 起一个新回合，而 ACP 的回合边界是 `session/prompt` 的一次请求/
   // 应答。那种自发回合发出的 `session/update` 没有对应的 `stopReason` 归属，
   // 编辑器侧也无从展示。要做得先设计非 prompt 触发的更新怎么归属（M1-c）。
-  await ctx.plugin(BashTool, { enableRunInBackground: false })
+  await mountNativeShell(ctx, 'sandbox')
 
   // ── 上下文压缩 ──────────────────────────────────────────────────────
   // 长会话撞到上下文上限时，把较早的一段总结成一条替换消息，而不是让下一次
@@ -415,4 +413,3 @@ export async function boot(env: NodeJS.ProcessEnv, onClosed?: () => void): Promi
   await ctx.plugin(acpBridge, { ...readEnv(env), onClosed } as never)
   return ctx
 }
-
