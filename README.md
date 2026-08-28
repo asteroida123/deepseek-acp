@@ -1,160 +1,189 @@
 # deepseek-acp
 
-[![npm 版本](https://img.shields.io/npm/v/deepseek-acp)](https://www.npmjs.com/package/deepseek-acp)
-[![npm 月下载量](https://img.shields.io/npm/dm/deepseek-acp)](https://www.npmjs.com/package/deepseek-acp)
-[![CI 状态](https://github.com/xintaofei/deepseek-acp/actions/workflows/ci.yml/badge.svg)](https://github.com/xintaofei/deepseek-acp/actions/workflows/ci.yml)
+**English** | [简体中文](README.zh-CN.md)
 
-把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 接成一个**面向编辑器的完整编码 Agent**，
-通过 [Agent Client Protocol](https://agentclientprotocol.com)（ACP）与客户端通话。
+[![npm version](https://img.shields.io/npm/v/deepseek-acp)](https://www.npmjs.com/package/deepseek-acp)
+[![npm monthly downloads](https://img.shields.io/npm/dm/deepseek-acp)](https://www.npmjs.com/package/deepseek-acp)
+[![CI status](https://github.com/xintaofei/deepseek-acp/actions/workflows/ci.yml/badge.svg)](https://github.com/xintaofei/deepseek-acp/actions/workflows/ci.yml)
 
-**可用客户端**：任何实现 ACP 的编辑器。开发期在 **[codeg](https://github.com/xintaofei/codeg)** 里实测；
-**[Zed](https://zed.dev)** 走同一套协议、配置方式见下，但尚未逐项验收过。
+Turns [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) into a
+**full-featured editor-facing coding agent** that communicates with clients over the
+[Agent Client Protocol](https://agentclientprotocol.com) (ACP).
+
+**Supported clients**: any editor that implements ACP. Development testing is done with
+**[codeg](https://github.com/xintaofei/codeg)**. **[Zed](https://zed.dev)** uses the same protocol
+and can be configured as shown below, but has not yet been validated feature by feature.
 
 ---
 
-## 为什么存在
+## Why This Exists
 
-DeepSeek Harness 自带一个 ACP server（`@deepseek-ai/dsh-acp`），但它的定位是
-**automation-only**——给程序用的，不是给人用的。上游自己的说明写得很直白：
+DeepSeek Harness ships with an ACP server (`@deepseek-ai/dsh-acp`), but it is designed for
+**automation only**, not for human interaction. The upstream description is explicit:
 
 > This package is a transport adapter, not a UI integration or a capability seam.
 > It does not expose editor navigation, transcript replay, commands, modes,
 > configuration pickers, elicitation, reasoning, plans, titles, or tool presentation.
 
-它的主要客户端是 `dsh-subagent-acp`——一个父 harness 派生子 agent 的通道。对这个用途，
-它的设计是对的：只发**已提交**的助手消息，不漏未提交的中间态，拿到的是干净的自动化结果。
+Its primary client is `dsh-subagent-acp`, a channel through which a parent harness spawns child
+agents. That design is right for this use case: it emits only **committed** assistant messages,
+omits uncommitted intermediate state, and returns a clean automation result.
 
-但同一套设计放进编辑器就不成立了：
+The same design falls short inside an editor:
 
-- **看不到模型在干什么。** 工具调用、命令输出、文件改动全部只留在会话日志里，界面上
-  只有最后一段文字。模型改了你的文件，你得自己去 `git diff` 才知道。
-- **没有逐字流式。** 只在整段消息提交后才推一次，长回答期间界面是静止的。
-- **一次性会话。** 关掉就没了——没有恢复、没有列表、没有标题。
-- **控制面全无。** 换模型、调文件权限、开计划模式、执行 slash 命令，都没有入口。
-- **拒绝 MCP。** `mcpServers` 只要非空就直接报错。
+- **You cannot see what the model is doing.** Tool calls, command output, and file changes remain
+  only in the session log; the UI shows nothing but the final text. If the model edits your files,
+  you have to run `git diff` yourself to find out what changed.
+- **There is no token-by-token streaming.** Updates arrive only after a complete message is
+  committed, leaving the UI motionless during long responses.
+- **Sessions are disposable.** Once closed, they are gone: there is no restore, list, or title.
+- **There is no control surface.** You cannot switch models, change file permissions, enable plan
+  mode, or run slash commands.
+- **MCP is rejected.** Any non-empty `mcpServers` value fails immediately.
 
-官方其实实现过一版完整的编辑器向 bridge，又在 2026-07-24 主动删掉了——理由是产品定位，
-不是技术不可行。**本项目填的就是这块被让出的生态位**：同一个 harness 内核，换一张
-为人准备的协议面。
+The upstream project actually built a complete editor-facing bridge, then deliberately removed it
+on 2026-07-24 for product-positioning reasons, not because it was technically infeasible. **This
+project fills that vacated niche**: the same harness core, with a protocol surface designed for
+humans.
 
 ---
 
-## 与内置 ACP 的能力对比
+## Feature Comparison
 
-| | `@deepseek-ai/dsh-acp`（内置） | **deepseek-acp**（本项目） |
+| Feature | `@deepseek-ai/dsh-acp` (built in) | **deepseek-acp** (this project) |
 |---|---|---|
-| 定位 | automation-only 传输适配器 | 面向编辑器的完整 Agent |
-| 回复流式 | 仅整段提交后推送 | 逐 token |
-| 思考过程 | ✗ 留在日志里 | ✅ `agent_thought_chunk` |
-| 工具调用 | ✗ 不呈现 | ✅ 卡片 + 状态流转 |
-| 文件 diff | ✗ | ✅ 编辑器原生 diff 视图 |
-| 终端输出 | ✗ | ✅ 终端卡片（Zed `_meta` 约定） |
-| 待办计划 | ✗ | ✅ `plan` + 计划模式 |
-| 会话恢复 / 列表 | ✗ 关掉即消失 | ✅ `load` / `list` / `resume` / `close`，带标题 |
-| 会话分叉 | ✗ | ✅ `session/fork`，父子各写各的日志 |
-| 会话内换模型 | ✗ | ✅ 模型、推理档位、文件权限三个选择器 |
-| slash 命令 | ✗ | ✅ 命令目录，不进模型 |
-| 技能（skills） | ✗ | ✅ 模型按需加载；用户可调用的进斜杠补全 |
-| 模型向你提问 | ✗ | ✅ 表单征询；客户端不支持时降级成按钮 |
-| MCP server | ✗ 非空即拒绝 | ✅ 按会话挂载，stdio + HTTP，会话间隔离 |
-| 上下文用量 | ✗ | ✅ `usage_update` 进度条 |
-| 读未保存的缓冲区 | ✗ | ✅ `fs/read_text_file` 改道到编辑器 |
-| 内嵌上下文（@ 文件） | ✗ `embeddedContext: false` | ✅ 整段内联 |
-| 图片输入 | ✗ `image: false` | ✅ 按线序进模型，字节落内容寻址库 |
-| 授权提示 | ✅ 一次性 allow / reject | ✅ 同左，另含沙箱越界提权 |
-| 多会话 | ✅ | ✅ |
+| Purpose | Automation-only transport adapter | Full editor-facing agent |
+| Response streaming | Only after a complete message is committed | Token by token |
+| Reasoning | No; remains in the log | Yes; `agent_thought_chunk` |
+| Tool calls | No presentation | Cards with status transitions |
+| File diffs | No | Native editor diff view |
+| Terminal output | No | Terminal cards using the Zed `_meta` convention |
+| Task plans | No | `plan` updates and plan mode |
+| Session restore / list | No; sessions disappear when closed | `load` / `list` / `resume` / `close`, with titles |
+| Session forks | No | `session/fork`, with separate parent and child logs |
+| In-session model switching | No | Model, reasoning level, and file-permission selectors |
+| Slash commands | No | Command catalog; commands do not enter model context |
+| Skills | No | Loaded by the model on demand; user-invocable skills appear in slash completion |
+| Model-to-user questions | No | Form elicitation, with a button fallback for unsupported clients |
+| MCP servers | No; rejects non-empty values | Per-session mounting, stdio and HTTP, isolated between sessions |
+| Context usage | No | `usage_update` progress indicator |
+| Unsaved buffers | No | Routes `fs/read_text_file` through the editor |
+| Embedded context (`@` files) | No; `embeddedContext: false` | Fully inlined |
+| Image input | No; `image: false` | Preserves interleaved order; bytes stored in a content-addressed store |
+| Permission prompts | One-time allow / reject | Same, plus elevation for sandbox boundary crossings |
+| Multiple sessions | Yes | Yes |
 
-**沙箱。** 命令与文件操作同在一道围栏之下（默认 `workspace-write`，可写集是
-`{会话 cwd, 系统临时目录}`），shell 与文件工具共用同一份定义。越界会被拒绝，
-模型可以就该次操作发起提权，提示走 `session/request_permission`。
+**Sandboxing.** Commands and file operations share the same boundary. The default mode is
+`workspace-write`, with writable roots set to `{session cwd, system temporary directory}`. Shell
+and file tools use the same policy definition. Boundary crossings are rejected, and the model can
+request elevation for a single operation through `session/request_permission`.
 
-Windows 使用系统 PowerShell（优先 PowerShell 7，回退 Windows PowerShell 5.1），工具名为
-`pwsh`，不需要 Git Bash；Linux 与 macOS 使用 `bash`。Windows ACL 后端报告
-`enforcement: partial`：它限制常规 NTFS 写入，不限制读取、网络与进程可见性，也不承诺覆盖
-WSL、FAT、Everyone ACL 或硬链接边界；沙箱不可用时会拒绝执行，不会静默转成完全访问。
+Windows uses the system PowerShell, preferring PowerShell 7 and falling back to Windows PowerShell
+5.1. The tool is named `pwsh`, and Git Bash is not required. Linux and macOS use `bash`. The Windows
+ACL backend reports `enforcement: partial`: it restricts ordinary NTFS writes, but does not restrict
+reads, network access, or process visibility, and does not promise coverage for WSL, FAT, Everyone
+ACLs, or hard-link boundaries. If sandboxing is unavailable, execution is rejected instead of
+silently falling back to unrestricted access.
 
-**内置工具**：平台 shell（Windows 为 `pwsh`，Linux/macOS 为 `bash`）、`read`、`write`、`edit`、`glob`、`grep`、`todo_write`、
-`ask_user_question`、`exit_plan_mode`，以及**按机器现有情况**决定的 `lsp`（见下）。
+**Built-in tools**: the platform shell (`pwsh` on Windows, `bash` on Linux and macOS), `read`,
+`write`, `edit`, `glob`, `grep`, `todo_write`, `ask_user_question`, `exit_plan_mode`, and `lsp` when
+supported by the current machine, as described below.
 
-**上下文压缩。** 长会话撞到窗口上限时自动把较早的一段总结成一条替换消息，而不是让下一次
-请求以「上下文超限」失败；也可以手动敲 `/compact`。声明了 `session.compaction` 的客户端会
-收到 `compaction_update` / `compaction_summary_chunk`，能看到压了哪一段、摘要是什么；没声明的
-客户端照常压缩，只是看不到进度。
+**Context compaction.** When a long session approaches the context-window limit, older messages
+are automatically summarized into a replacement message instead of letting the next request fail
+with a context-limit error. You can also run `/compact` manually. Clients that declare
+`session.compaction` receive `compaction_update` and `compaction_summary_chunk` notifications that
+show which segment was compacted and what summary replaced it. Other clients still get compaction,
+but without progress updates.
 
-**死循环护栏。** 模型连续用同样的参数调同一个工具时注入一条升级提示。不进工具表、不否决
-调用、不改写入参——决定权仍在模型手里，合法的重复调用不受任何影响。
+**Repetition guard.** If the model repeatedly calls the same tool with identical arguments, the
+agent injects an escalation prompt. It does not add anything to the tool catalog, reject the call,
+or rewrite its arguments. The model retains control, so legitimate repeated calls continue to work.
 
-**图片输入。** 贴图或拖图进来即可，文本与图片**按线序**进模型（「改之前 [图] 改之后 [图]」
-不会被拍成「改之前改之后 [图][图]」）。字节落进 `$DSH_HOME/attachments/` 的内容寻址库，
-会话日志里只留引用——base64 直接写进日志会让一条日志涨到几十 MB，而每次恢复都要整份读回来。
-默认模型 `deepseek-v4-flash` **不收图片**：发图会被拒绝，并告诉你去模型选择器里换成
-`deepseek-v4-flash-vision-exp`。接受 PNG / JPEG / WebP / GIF，单条消息最多 20 张。
+**Image input.** Paste or drag images into the editor. Text and images enter the model in their
+original interleaved order, so `before [image] after [image]` does not become
+`before after [image] [image]`. Image bytes are stored in a content-addressed store under
+`$DSH_HOME/attachments/`, while session logs contain references only. Writing base64 directly into
+the log could make a single entry tens of megabytes, and every restore would have to read the whole
+file. The default model, `deepseek-v4-flash`, **does not accept images**. Image messages are rejected
+with a prompt to switch to `deepseek-v4-flash-vision-exp` in the model selector. PNG, JPEG, WebP, and
+GIF are supported, with up to 20 images per message.
 
-**代码导航（`lsp`）。** 装了语言服务器就自动接上，没装就当它不存在——启动时按 `PATH`
-查一遍内置候选（`typescript-language-server`、`pyright-langserver`、`gopls`、
-`rust-analyzer`），一个都找不到就整套不挂。这不是偷懒：上游的 stdio 宿主在**插件加载时**
-解析每一项的可执行文件，任何一项找不到就没有 provider 注册得上，写死一张默认表等于
-「少装一个 gopls 就连不上编辑器」。要用别的服务器（`deno lsp`、项目本地的
-`node_modules/.bin/…`、自研的），设 `DEEPSEEK_ACP_LSP_SERVERS` 为一份 servers JSON，
-它**整表替换**内置候选。工具本身是只读的四个操作：`goToDefinition`、`findReferences`、
-`goToImplementation`、`hover`。
+**Code navigation (`lsp`).** Language servers are connected automatically when installed; if none
+are found, the entire tool is omitted. At startup, the agent scans `PATH` once for built-in
+candidates (`typescript-language-server`, `pyright-langserver`, `gopls`, and `rust-analyzer`). This
+is deliberate: the upstream stdio host resolves every executable while loading the plugin, so one
+missing executable prevents any provider from registering. A hard-coded default table would mean
+that missing `gopls` could disable editor integration entirely. To use a different server, such as
+`deno lsp`, a project-local `node_modules/.bin/...` executable, or an in-house implementation, set
+`DEEPSEEK_ACP_LSP_SERVERS` to a servers JSON value. It **replaces the entire built-in table**. The
+tool itself is read-only and exposes four operations: `goToDefinition`, `findReferences`,
+`goToImplementation`, and `hover`.
 
-**刻意不做的**：`fs/write_text_file` 委托（会绕开沙箱围栏，让「文件权限」选择器形同虚设）、
-后台任务（自发回合发出的更新没有对应的 `stopReason` 归属）、上游的 `packages/extensions/`
-（`cordis_define` / `cordis_run` 那套「模型改写自身运行时」——它在 `node:vm` 里跑、拿到活的
-服务门面，绕开上面那道围栏；且它的启动控件是浏览器半边，没发布到 npm）。**受阻于上游的**：
-`session/delete`（持久化后端至今没有 delete/purge API）、MCP 的 `sse` / `acp` 传输。
+**Intentionally omitted**: delegation through `fs/write_text_file`, which would bypass the sandbox
+and make the file-permission selector meaningless; background jobs, because updates from
+self-initiated turns have no corresponding `stopReason`; and the upstream `packages/extensions/`
+system (`cordis_define` / `cordis_run`). That system lets the model rewrite its own runtime inside
+`node:vm` with a live service facade, bypassing the sandbox above, and its startup controls live in
+an unpublished browser-side package. **Blocked by upstream limitations**: `session/delete`, because
+the persistence backend has no delete or purge API, and the MCP `sse` / `acp` transports.
 
 ---
 
-## 注册到编辑器
+## Editor Setup
 
-可执行文件是 `deepseek-acp`，通过 stdio 说 ACP。**起服务不需要任何参数**——编辑器直接
-拉起即可；`--setup` / `--version` / `--help` 三个开关都是「跑完就退」，不进服务模式，
-其余参数一律照常起服务（编辑器可能出于自己的理由多传点什么，为此拒绝启动会把一个
-能跑的集成变成一句「连接失败」）。
+The executable is `deepseek-acp` and speaks ACP over stdio. **Starting the server requires no
+arguments**: editors can launch it directly. The `--setup`, `--version`, and `--help` switches run
+their action and exit without entering server mode. Any other arguments still start the server
+normally. Editors may pass extra arguments for their own reasons, and rejecting them would turn a
+working integration into a generic "connection failed" message.
 
-API Key 有两条路，二选一：
+There are two ways to provide an API key; choose one:
 
-- **`deepseek-acp --setup`** —— 交互式粘一次，存进 `$DSH_HOME/.credentials.yaml`
-  （`0600`）。见下面「登录」一节。
-- **客户端的环境变量** —— 下面两份配置都有位置。
+- **`deepseek-acp --setup`**: paste the key once in an interactive prompt. It is stored in
+  `$DSH_HOME/.credentials.yaml` with mode `0600`. See [Login](#login) below.
+- **Client environment variables**: both configurations below show where to set one.
 
-**别指望 `.zshrc` 里的 `export`**——编辑器是 GUI 应用，不继承登录 shell 的环境，
-它派生的子进程同样拿不到。这也正是 `--setup` 存在的理由：凭据落在文件里，与启动
-方式无关。
+**Do not rely on `export` in `.zshrc`.** GUI editors do not inherit the login shell environment,
+and neither do the child processes they spawn. This is why `--setup` stores credentials in a file
+independently of the launch environment.
 
-### 登录
+### Login
 
-`initialize` 里可能 advertise 一条 ACP 的 **Terminal Auth**：
+During `initialize`, the server may advertise an ACP **Terminal Auth** method:
 
 ```json
 { "id": "terminal", "type": "terminal", "args": ["--setup"] }
 ```
 
-**只发给声明认得它的客户端**——`clientCapabilities.auth.terminal === true`，或
-`_meta["terminal-auth"] === true`（先于能力位存在的约定）。两者都没有时 `authMethods`
-是空数组，与这个功能存在之前一模一样：终端登录是 opt-in 的方法类型，塞给没准备好的
-客户端只会添乱。顺带一提，顶层的 `clientCapabilities.terminal` **不算**——那一位说的
-是「实现了 `terminal/*` 那组方法」（终端卡片），是另一件事。
+It is sent **only to clients that declare support** through
+`clientCapabilities.auth.terminal === true` or `_meta["terminal-auth"] === true`, a convention that
+predates the capability flag. Without either signal, `authMethods` is an empty array, exactly as it
+was before this feature existed. Terminal login is an opt-in method type, and advertising it to an
+unprepared client would only cause problems. The top-level `clientCapabilities.terminal` flag does
+**not** count: that flag indicates support for the `terminal/*` methods used by terminal cards, which
+is a different feature.
 
-支持这条的客户端会用**同一个二进制**加上 `--setup` 另起一个交互式终端进程，等它
-退出——**退出码 0 即成功**——再重连。手动跑也是同一条：
+Supporting clients launch the **same executable** with `--setup` in a separate interactive terminal
+and wait for it to exit. **Exit code 0 means success**, after which they reconnect. You can run the
+same command manually:
 
 ```sh
-deepseek-acp --setup      # 粘 Key，回车。终端下不回显
+deepseek-acp --setup      # Paste the key and press Enter. Terminal input is hidden.
 ```
 
-写入的引用名是 `DEEPSEEK_API_KEY`，落点 `$DSH_HOME/.credentials.yaml`。这一层**赢过**
-环境变量之外的两个 `.env` 层，所以之前在 `.env` 里放过的旧 Key 不会把它压住；而进程
-启动时**显式传入**的环境变量仍然优先级最高（那是「这一次运行」的操作意图）。
+The stored credential key is `DEEPSEEK_API_KEY`, written to `$DSH_HOME/.credentials.yaml`. This
+source takes precedence over the two `.env` layers, so an old key left in `.env` cannot override it.
+An environment variable explicitly passed to the process still has the highest priority, because
+it represents the intent for that particular run.
 
-声明这条**不代表会拦住建会话**：本项目从不返回 `auth_required`，缺 Key 的失败照旧
-发生在第一个回合（`MISSING_CREDENTIAL`）。它只是给客户端一个登录入口。
+Advertising this method does **not** block session creation. This project never returns
+`auth_required`; without a key, the first turn still fails with `MISSING_CREDENTIAL`. Terminal Auth
+simply gives clients a login entry point.
 
 ### Zed
 
-`settings.json` 里加一个 `agent_servers` 条目：
+Add an `agent_servers` entry to `settings.json`:
 
 ```json
 {
@@ -169,57 +198,66 @@ deepseek-acp --setup      # 粘 Key，回车。终端下不回显
 }
 ```
 
-装到全局（`npm i -g deepseek-acp`）的话，`command` 填 `deepseek-acp`、`args` 留空即可。
+If installed globally with `npm i -g deepseek-acp`, set `command` to `deepseek-acp` and leave
+`args` empty.
 
 ### codeg
 
-codeg **已经内置**这个智能体，不用再手动添加自定义条目：设置 → 智能体，在列表里
-找到 **DeepSeek Harness**，点 **安装**；装过之后同一处变成 **升级**，跟着 codeg 内置
-注册表里的版本走。装的就是上面那条 npx 分发，不需要先 `npm i -g`。
+codeg **already includes** this agent, so there is no need to add a custom entry. Open
+**Settings > Agents**, find **DeepSeek Harness**, and select **Install**. Once installed, the same
+control becomes **Upgrade** and follows the version in codeg's built-in registry. The installed
+package uses the same npx distribution shown above, so a prior global npm installation is not
+required.
 
-Key 填在同一页的 **DeepSeek Harness 配置** 面板：
+Enter the key in the **DeepSeek Harness Configuration** panel on the same page:
 
-| 字段 | 说明 |
+| Field | Description |
 |---|---|
-| API 端点 | 留空即官方端点 |
-| API 密钥 | 以 `DEEPSEEK_API_KEY` 传给智能体；**用过 `--setup` 的话这里留空**——环境变量压过凭据文件 |
+| API endpoint | Leave empty to use the official endpoint |
+| API key | Passed to the agent as `DEEPSEEK_API_KEY`; **leave empty after using `--setup`**, because environment variables override the credential file |
 
-**保存 DeepSeek 配置** 只对**新建**的会话生效，正在跑的会话要重连才换得过来。模型与
-推理档位不在这张表里——它们是会话级选择器，在输入框里切。
+**Save DeepSeek Configuration** affects only **new** sessions. Reconnect any running session to
+apply changes. The model and reasoning level are not configured in this panel; they are
+session-level selectors available from the input box.
 
-旧版 codeg 没有这个内置条目，仍可走 设置 → 智能体 → **添加自定义智能体** →
-**手动填写**：注册表 ID `deepseek-acp`、分发信息
-`{"npx": {"package": "deepseek-acp@0.7.0", "cmd": "deepseek-acp"}}`、环境变量
-`DEEPSEEK_API_KEY=sk-...`，版本查询命令留空。「版本」一栏要与分发信息里的版本一致
-——codeg 的 preflight 会对账，对不上的表现是连接阶段失败而不是报错。
+Older codeg versions without the built-in entry can still use **Settings > Agents > Add Custom
+Agent > Manual Configuration**. Set the registry ID to `deepseek-acp`, the distribution information
+to `{"npx": {"package": "deepseek-acp@0.7.0", "cmd": "deepseek-acp"}}`, and the environment
+variable to `DEEPSEEK_API_KEY=sk-...`; leave the version-query command empty. The **Version** field
+must match the version in the distribution information. codeg checks them during preflight, and a
+mismatch appears as a connection failure rather than a validation error.
 
-MCP 开着时，`codeg-mcp` 会作为 server 挂进来，模型看到的工具名带**会话前缀**
-（`mcp__a1_codeg-mcp__<tool>`）：`serverName` 在进程内全局唯一，而 ACP 的
-`mcpServers` 是每会话参数，不加前缀时第二个会话会挂不上。
+When MCP is enabled, `codeg-mcp` is mounted as a server and the model sees tool names with a
+**session prefix**, such as `mcp__a1_codeg-mcp__<tool>`. `serverName` is globally unique within a
+process, while ACP's `mcpServers` is a per-session parameter. Without the prefix, a second session
+could not mount the server.
 
-### 会话日志
+### Session Logs
 
-默认写在 `$DSH_HOME/sessions`（即 `~/.dsh/sessions`），可用
-`DEEPSEEK_ACP_SESSIONS_ROOT` 覆盖。会话恢复、列表与标题都从这里读。
-
----
-
-## 致谢
-
-- **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** —— 本项目的内核。
-  没有它就没有这层适配器；曾经存在过的那版编辑器向 bridge 也给了本项目大量参考。
-- **[LinuxDO](https://linux.do)** —— 本项目的起源社区。
+Logs are written to `$DSH_HOME/sessions` (`~/.dsh/sessions`) by default. Override the location with
+`DEEPSEEK_ACP_SESSIONS_ROOT`. Session restore, listing, and titles all read from this directory.
 
 ---
 
-## 许可
+## Acknowledgments
 
-本项目 MIT，见 [`LICENSE`](LICENSE)。**这是一个非官方的社区适配器，与 DeepSeek
-无隶属关系，亦未获其背书。**
+- **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)**: the core of this project.
+  This adapter would not exist without it, and the former editor-facing bridge provided substantial
+  guidance.
+- **[LinuxDO](https://linux.do)**: the community where this project began.
 
-仓库不含任何第三方源码的逐字副本。但**测试套件与设计**有相当一部分派生自
-DeepSeek Harness 曾经存在的编辑器向 ACP bridge（`packages/ui/acp`，2026-07-24 被删除）。
-**该快照适用 BSD-3-Clause 而不是仓库今天的 MIT**——上游是在删除之后才换的许可。
-其原始版权声明与许可正文按 BSD 第 1 条的要求随附在 [`LICENSE`](LICENSE) 里。
+---
 
-想参与开发见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
+## License
+
+This project is licensed under MIT; see [`LICENSE`](LICENSE). **It is an unofficial community
+adapter, is not affiliated with DeepSeek, and is not endorsed by DeepSeek.**
+
+The repository contains no verbatim copies of third-party source code. However, substantial parts
+of the **test suite and design** derive from the former DeepSeek Harness editor-facing ACP bridge
+(`packages/ui/acp`, removed on 2026-07-24). **That snapshot is licensed under BSD-3-Clause, not the
+MIT license used by the repository today**, because upstream changed its license only after the
+deletion. Its original copyright notice and license text are included in [`LICENSE`](LICENSE) as
+required by clause 1 of the BSD license.
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) to contribute.
