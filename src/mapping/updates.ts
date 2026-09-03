@@ -19,6 +19,7 @@ import { harnessBlockToAcpContent } from '../codec/content.js'
 import { modeId } from '../config/modes.js'
 import type { ToolPresenter } from '../presentation/presenter.js'
 import { NO_TERMINAL, toolCallUpdate, toolResultUpdate, type TerminalRendering } from '../presentation/tool-call.js'
+import { assistantMessageId } from '../session/fork-point.js'
 import { todosToPlan } from './plan.js'
 
 /** 映射一条事件所需的会话上下文。 */
@@ -79,12 +80,21 @@ export function mapEvent(event: SessionEvent, context: MappingContext = {}): Ses
   switch (event.type) {
     case 'assistant/chunk': {
       const chunk = event.data.chunk
+      // ACP 的 `messageId` 语义是「同一条消息的所有分片共享，值变了即新消息开始」，
+      // 而上游一步（step）恰好产出一条助手消息，所以 `<turn>:<step>` 就是它。
+      //
+      // 取 `turn`/`step` 而不是那条消息自己的持久 id：id 要等 `assistant/message`
+      // 组装完才有，而分片是在那之前逐条发出去的。turn/step 在分片上就带着，因此
+      // 实时流与 `session/load` 重放给出的是同一串值——两条路径共用本函数。
+      //
+      // 推理与正文属于**同一条**消息，故共享同一个 id。
+      const messageId = assistantMessageId(event.data.turn, event.data.step)
       // 增量转发，不缓冲成整段——这正是相对官方 automation 通道的核心差异（US-03）。
       if (chunk.type === 'text-delta') {
-        return [{ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: chunk.text } }]
+        return [{ sessionUpdate: 'agent_message_chunk', messageId, content: { type: 'text', text: chunk.text } }]
       }
       if (chunk.type === 'reasoning-delta') {
-        return [{ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: chunk.text } }]
+        return [{ sessionUpdate: 'agent_thought_chunk', messageId, content: { type: 'text', text: chunk.text } }]
       }
       // block-start 等非文本增量不产出更新。
       return []
@@ -186,7 +196,11 @@ export function mapEvent(event: SessionEvent, context: MappingContext = {}): Ses
       const updates: SessionUpdate[] = []
       for (const block of event.data.content) {
         const content = harnessBlockToAcpContent(block)
-        if (content !== undefined) updates.push({ sessionUpdate: 'user_message_chunk', content })
+        // 这里用消息自己的持久 id：`user/message` 事件的数据**就是**那条消息，
+        // 没有 turn/step 可取（用户消息在回合里被认领，不属于某一步）。
+        if (content !== undefined) {
+          updates.push({ sessionUpdate: 'user_message_chunk', messageId: event.data.id, content })
+        }
       }
       return updates
     }

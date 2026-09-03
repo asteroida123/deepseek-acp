@@ -53,7 +53,7 @@ DeepSeek Harness 自带一个 ACP server（`@deepseek-ai/dsh-acp`），但它的
 | 终端输出 | ✗ | ✅ 终端卡片（Zed `_meta` 约定） |
 | 待办计划 | ✗ | ✅ `plan` + 计划模式 |
 | 会话恢复 / 列表 | ✗ 关掉即消失 | ✅ `load` / `list` / `resume` / `close`，带标题 |
-| 会话分叉 | ✗ | ✅ `session/fork`，父子各写各的日志 |
+| 会话分叉 | ✗ | ✅ `session/fork`，父子各写各的日志；客户端指名时从那条消息分叉 |
 | 会话内换模型 | ✗ | ✅ 模型、推理档位、文件权限三个选择器 |
 | slash 命令 | ✗ | ✅ 命令目录，不进模型 |
 | 技能（skills） | ✗ | ✅ 模型按需加载；用户可调用的进斜杠补全 |

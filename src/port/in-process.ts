@@ -44,6 +44,7 @@ import { mountSessionFs, type ClientTextReader } from '../composition/session-fs
 import { WORKSPACE_ORDER, WORKSPACE_SECTION, localDate, renderWorkspace } from '../composition/workspace.js'
 import { mountMcpServers } from '../mcp/mount.js'
 import type { McpMountSpec } from '../mcp/spec.js'
+import { forkPointBoundary, type ForkPoint } from '../session/fork-point.js'
 import type {
   AgentHandle,
   CommandPlane,
@@ -139,6 +140,9 @@ async function mapWithLimit<T, R>(
 /**
  * 选出可以当 fork 种子的那一段历史。
  *
+ * 有分叉点时截到指名那条助手消息所在回合结束为止（见
+ * `src/session/fork-point.ts`）；没有时才是下面这条尾部规则。
+ *
  * 规则只有一条：**种子不能停在一个没结束的回合里**。上游对种子的校验写得很死
  * （「no open turn/step or dangling tool call」），停在半截回合上会在建会话时
  * 被拒——而那条错误信息是从会话边界深处抛出来的，读起来与用户做的事毫无关系。
@@ -155,9 +159,14 @@ async function mapWithLimit<T, R>(
  * 「回合正在跑」是另一回事，不在这里处理：那种情况下等一会儿就好，协议层会在
  * 更早的地方拦下来并说清楚（见 `src/protocol/session-fork.ts`）。
  * @param events - 父会话的完整事件日志，按 seq 升序
+ * @param point - 客户端指名的分叉点；缺席时按上面的尾部规则取
  * @returns 可安全用作种子的前缀；父会话尚无事件时为空
+ * @throws 给了分叉点却认不出来时抛 `ForkPointUnresolved`
  */
-function forkSeed(events: readonly SessionEvent[]): readonly SessionEvent[] {
+function forkSeed(events: readonly SessionEvent[], point: ForkPoint | undefined): readonly SessionEvent[] {
+  // 指名了分叉点就按它截。这条路径**不**再走下面的尾部退让：那是给「日志停在
+  // 半截回合上」兜底的，而分叉点自己已经落在某个 `turn/end` 上。
+  if (point !== undefined) return events.slice(0, forkPointBoundary(events, point) + 1)
   // 从后往前找第一个回合边界。找到 `turn/end` 说明最后一个回合是关上的，整段
   // 都能用；找到 `turn/start` 说明它之后的事件属于一个没结束的回合。
   for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -769,7 +778,7 @@ export function createInProcessPort(ctx: Context): HarnessPort {
           cwd: handle.agent.session.header.cwd,
         }
       },
-      async fork({ parentSessionId, sessionId, provider, model, mcpServers, readDelegate }) {
+      async fork({ parentSessionId, sessionId, provider, model, mcpServers, readDelegate, forkPoint }) {
         // 父会话的历史有两个来路，取**活的**那份优先：持久化是按窗口批量写的
         // （`writeBatchMaxDelayMs`），刚说完的那句话可能还在缓冲里没落盘。从盘上
         // 读会静默丢掉最后几条——fork 出来的会话少了刚刚那轮对话，而且看不出来。
@@ -781,7 +790,9 @@ export function createInProcessPort(ctx: Context): HarnessPort {
             ? undefined
             : await persistence.inspect(parentSessionId)
         const parentCwd = liveParent?.header.cwd ?? stored?.meta.cwd
-        const seed = forkSeed(liveParent?.events ?? stored?.events ?? [])
+        // 分叉点也在这里解析，理由与上面同源：协议层看不到**活**会话的事件，
+        // 让它自己再读一遍盘，读到的还会是少了最后几条的那份。
+        const seed = forkSeed(liveParent?.events ?? stored?.events ?? [], forkPoint)
 
         const selection = initialSelection(provider, model)
         // **`agents.create` 而不是 `ctx.sessions.fork`。** 后者看起来更贴切，但它

@@ -60,7 +60,7 @@ humans.
 | Terminal output | No | Terminal cards using the Zed `_meta` convention |
 | Task plans | No | `plan` updates and plan mode |
 | Session restore / list | No; sessions disappear when closed | `load` / `list` / `resume` / `close`, with titles |
-| Session forks | No | `session/fork`, with separate parent and child logs |
+| Session forks | No | `session/fork`, with separate parent and child logs; forks at a chosen message when the client names one |
 | In-session model switching | No | Model, reasoning level, and file-permission selectors |
 | Slash commands | No | Command catalog; commands do not enter model context |
 | Skills | No | Loaded by the model on demand; user-invocable skills appear in slash completion |

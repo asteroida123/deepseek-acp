@@ -132,21 +132,31 @@ describe('promptHasUnsupportedContent', () => {
 })
 
 describe('mapEvent', () => {
-  const chunkEvent = (chunk: unknown) =>
-    ({ type: 'assistant/chunk', data: { chunk } }) as never
+  const chunkEvent = (chunk: unknown, turn = 1, step = 1) =>
+    ({ type: 'assistant/chunk', data: { turn, step, chunk } }) as never
 
   it('把 text-delta 映射为 agent_message_chunk（增量，US-03）', () => {
     const updates = mapEvent(chunkEvent({ type: 'text-delta', text: 'hi' }))
     expect(updates).toEqual([
-      { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hi' } },
+      { sessionUpdate: 'agent_message_chunk', messageId: '1:1', content: { type: 'text', text: 'hi' } },
     ])
   })
 
   it('把 reasoning-delta 映射为 agent_thought_chunk', () => {
     const updates = mapEvent(chunkEvent({ type: 'reasoning-delta', text: 'think' }))
     expect(updates).toEqual([
-      { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'think' } },
+      { sessionUpdate: 'agent_thought_chunk', messageId: '1:1', content: { type: 'text', text: 'think' } },
     ])
+  })
+
+  it('正文与推理共享同一个 messageId，换一步就换一个', () => {
+    // ACP 对 `messageId` 的语义是「值变了即新消息开始」。推理与正文属于同一条
+    // 助手消息，必须同 id；下一步（工具跑完之后那次模型调用）才是新消息。
+    const same = (chunk: unknown, turn?: number, step?: number): unknown =>
+      (mapEvent(chunkEvent(chunk, turn, step))[0] as { messageId?: string }).messageId
+    expect(same({ type: 'text-delta', text: 'a' })).toBe(same({ type: 'reasoning-delta', text: 'b' }))
+    expect(same({ type: 'text-delta', text: 'a' })).not.toBe(same({ type: 'text-delta', text: 'a' }, 1, 2))
+    expect(same({ type: 'text-delta', text: 'a' })).not.toBe(same({ type: 'text-delta', text: 'a' }, 2, 1))
   })
 
   it('非文本增量（如 block-start）不产出更新', () => {

@@ -13,6 +13,7 @@ import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type { ClientTextReader } from '../composition/session-fs.js'
 import type { McpMountSpec } from '../mcp/spec.js'
 import type { ToolLookup } from '../presentation/presenter.js'
+import type { ForkPoint } from '../session/fork-point.js'
 
 /**
  * agent 句柄。
@@ -112,7 +113,9 @@ export interface SessionLifecycle {
    * 父会话不会因为子会话继续对话而改变。这正是 ACP `session/fork` 要的东西
    * ——「基于这段上下文另开一支，不影响原来那条」。
    *
-   * 种子取到**最后一个完整回合**为止，见实现里的 `forkSeed`。
+   * 种子默认取到**最后一个完整回合**为止，见实现里的 `forkSeed`。
+   * @param options.forkPoint - 客户端指名的分叉点；给了就截到那条助手消息所在
+   *   回合结束为止，认不出来时抛 `ForkPointUnresolved`
    * @returns 子会话句柄；`cwd` 取自父会话的 header（工作区随历史继承）
    */
   fork(options: {
@@ -122,6 +125,7 @@ export interface SessionLifecycle {
     model?: string
     mcpServers?: readonly McpMountSpec[]
     readDelegate?: ClientTextReader
+    forkPoint?: ForkPoint
   }): Promise<AgentHandle & { readonly cwd: string | undefined }>
   /** 该 agent 是否仍在活注册表中且为同一对象（防同 id 冒充） */
   isLive(agent: Agent): boolean

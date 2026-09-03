@@ -14,13 +14,15 @@ import { createHarness, waitFor, type CapturedUpdate, type TestHarness } from '.
 import { NATIVE_SHELL_TOOL, stdoutCommand } from './native-shell.js'
 import { aliasDir, realTempDir } from './temp-dir.js'
 
-/** 在一个独立 harness 里聊一轮，返回会话 id 与它产出的更新。 */
+/** 在一个独立 harness 里聊一轮，返回会话 id 与它产出的更新（含未经压缩的原始帧）。 */
 async function recordSession(
   root: string,
   cwd: string,
   options: { deltas?: string[]; toolCall?: { id: string; name: string; args: string } } = {},
-): Promise<{ sessionId: string; updates: CapturedUpdate[] }> {
+): Promise<{ sessionId: string; updates: CapturedUpdate[]; raw: Record<string, unknown>[] }> {
   const h = await createHarness({ sessionsRoot: root, ...(options.toolCall !== undefined ? { shell: 'local' as const } : {}) })
+  const raw: Record<string, unknown>[] = []
+  h.onUpdate((u) => raw.push(u as Record<string, unknown>))
   const { sessionId } = await h.acp.request('session/new', { cwd, mcpServers: [] })
   if (options.deltas !== undefined) h.llm.deltas = options.deltas
   if (options.toolCall !== undefined) h.llm.toolCall = options.toolCall
@@ -43,7 +45,7 @@ async function recordSession(
   // 印在失败消息里，让下次复现自己说出原因。
   const trouble = h.logs.filter((l) => l.type === 'warn' || l.type === 'error')
   expect(trouble.map((l) => `[${l.type}] ${l.name}: ${l.text}`), '录制期出现后台失败').toEqual([])
-  return { sessionId: String(sessionId), updates: h.updates }
+  return { sessionId: String(sessionId), updates: h.updates, raw }
 }
 
 /** 用新 harness 从磁盘恢复。 */
@@ -81,6 +83,25 @@ describe('TC-LOAD-01 历史重放', () => {
     expect(text).toContain('前情提要')
     // 用户那条也要在，否则恢复出来的是一段没有问题的回答
     expect(raw.some((u) => u['sessionUpdate'] === 'user_message_chunk')).toBe(true)
+    h.disposeBridge()
+  }, 30_000)
+
+  it('重放给出的 messageId 与实时流那次逐条相同', async () => {
+    // 客户端在实时流里记下一个 messageId，可能过几天、重开编辑器之后才拿它去
+    // `session/fork`。两条路径给出不同的 id，那次分叉就会以「找不到这条消息」
+    // 失败——而两边走的本来就是同一个 `mapEvent`，这条用例守的是它别被拆开。
+    const root = realTempDir('dsacp-load-')
+    const cwd = realTempDir('dsacp-ws-')
+    const ids = (updates: readonly Record<string, unknown>[]): unknown[] =>
+      updates.filter((u) => u['sessionUpdate'] === 'agent_message_chunk').map((u) => u['messageId'])
+
+    const { sessionId, raw: live } = await recordSession(root, cwd, { deltas: ['前情', '提要'] })
+    const { h, raw } = await loadInto(root, sessionId, cwd)
+
+    expect(ids(live).length, '录制期本该有助手分片').toBeGreaterThan(0)
+    expect(ids(raw)).toEqual(ids(live))
+    // 同一条消息的分片共享一个 id —— ACP 对这个字段的语义就是「值变了即新消息」。
+    expect(new Set(ids(live)).size).toBe(1)
     h.disposeBridge()
   }, 30_000)
 
@@ -272,9 +293,11 @@ describe('TC-LOAD-03 重放里的用户消息', () => {
     expect(mapEvent(userEvent({ kind: 'user' }, '你好'), {})).toEqual([])
   })
 
-  it('重放时回放用户消息', () => {
+  it('重放时回放用户消息，带上这条消息的持久 id', () => {
+    // `messageId` 是 ACP 给 `ContentChunk` 的标准字段（同一条消息的分片共享它）。
+    // 用户消息没有 turn/step 可取，用的是消息自己那个跨表示边界不变的 id。
     expect(mapEvent(userEvent({ kind: 'user' }, '你好'), { replay: true })).toEqual([
-      { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: '你好' } },
+      { sessionUpdate: 'user_message_chunk', messageId: 'm-1', content: { type: 'text', text: '你好' } },
     ])
   })
 

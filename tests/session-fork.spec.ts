@@ -12,6 +12,7 @@
 
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { describe, expect, it } from 'vitest'
+import { fingerprintAgentMessage } from '../src/session/fork-point.js'
 import { createHarness, waitFor, type TestHarness } from './harness.js'
 import { aliasDir, realTempDir } from './temp-dir.js'
 
@@ -28,6 +29,11 @@ async function chat(h: TestHarness, cwd: string, text: string): Promise<string> 
 /** 最后一次请求带的对话历史，压成 `角色:文本`。 */
 function lastHistory(h: TestHarness): string[] {
   return h.llm.historiesUsed.at(-1) ?? []
+}
+
+/** 分叉点的线上形状：`_meta.jetbrains.air.fork`，版本恒为 1。 */
+function forkMeta(fork: Record<string, unknown>): Record<string, unknown> {
+  return { jetbrains: { air: { fork: { version: 1, ...fork } } } }
 }
 
 describe('TC-FORK-01 能力声明', () => {
@@ -212,6 +218,184 @@ describe('TC-FORK-04 fork 一条没打开的会话', () => {
     expect(ids).toContain(child)
     h.disposeBridge()
   }, 60_000)
+})
+
+describe('TC-FORK-06 从指定消息分叉', () => {
+  /** 聊三轮，每轮的回答各不相同；返回父会话 id 与客户端收到的全部更新。 */
+  async function threeTurns(
+    h: TestHarness,
+    cwd: string,
+  ): Promise<{ parent: string; seen: Record<string, unknown>[] }> {
+    const seen: Record<string, unknown>[] = []
+    h.onUpdate((update) => seen.push(update as Record<string, unknown>))
+    const { sessionId } = await h.acp.request('session/new', { cwd, mcpServers: [] })
+    const parent = String(sessionId)
+    for (const [ask, reply] of [
+      ['第一问', ['第一轮', '回答']],
+      ['第二问', ['第二轮', '回答']],
+      ['第三问', ['第三轮', '回答']],
+    ] as const) {
+      h.llm.deltas = [...reply]
+      await h.acp.request('session/prompt', {
+        sessionId: parent as never,
+        prompt: [{ type: 'text', text: ask }],
+      })
+    }
+    return { parent, seen }
+  }
+
+  /** 在子会话里问一句，返回模型这次拿到的历史。 */
+  async function askChild(h: TestHarness, child: string): Promise<string[]> {
+    await h.acp.request('session/prompt', {
+      sessionId: child as never,
+      prompt: [{ type: 'text', text: '接着说' }],
+    })
+    return lastHistory(h)
+  }
+
+  it('按 messageId 分叉 —— 子会话只继承到那一轮为止', async () => {
+    const h = await createHarness()
+    const cwd = realTempDir('dsacp-ws-')
+    const { parent, seen } = await threeTurns(h, cwd)
+
+    // 客户端指的就是它自己在 `agent_message_chunk` 上收到的那个 id——这条链要能
+    // 走通，发出去的 id 与解析时认的 id 必须是同一套。
+    const messageId = seen.find((u) => u['sessionUpdate'] === 'agent_message_chunk')?.['messageId']
+    expect(typeof messageId, '助手分片上必须带 messageId').toBe('string')
+
+    const forked = await h.acp.request('session/fork', {
+      sessionId: parent as never,
+      cwd,
+      mcpServers: [],
+      _meta: forkMeta({ messageId }),
+    })
+    const history = await askChild(h, String(forked.sessionId))
+
+    const joined = history.join('\n')
+    expect(joined).toContain('第一问')
+    expect(joined).toContain('第一轮回答')
+    // 这两条是这个功能的**定义**：分叉点之后的对话不能进子会话。少了它们，一个
+    // 「读了 _meta 但没截」的实现照样通过上面那两条。
+    expect(joined).not.toContain('第二轮回答')
+    expect(joined).not.toContain('第三轮回答')
+    h.disposeBridge()
+  }, 30_000)
+
+  it('按指纹分叉 —— codeg 实际走的是这条路', async () => {
+    // codeg 从 JSONL 里认会话，手上没有我们发出去的 messageId，只能拿回答正文的
+    // sha256 来指认（`messageId` 那栏它填的是自己的 turn id，故意不会命中）。
+    const h = await createHarness()
+    const cwd = realTempDir('dsacp-ws-')
+    const { parent } = await threeTurns(h, cwd)
+
+    const forked = await h.acp.request('session/fork', {
+      sessionId: parent as never,
+      cwd,
+      mcpServers: [],
+      _meta: forkMeta({
+        messageId: 'codeg-turn-1',
+        messageFingerprint: fingerprintAgentMessage('第二轮回答'),
+      }),
+    })
+    const joined = (await askChild(h, String(forked.sessionId))).join('\n')
+    expect(joined).toContain('第二轮回答')
+    expect(joined).not.toContain('第三轮回答')
+    h.disposeBridge()
+  }, 30_000)
+
+  it('不给 _meta 时仍是尾部 fork —— 老客户端行为不变', async () => {
+    const h = await createHarness()
+    const cwd = realTempDir('dsacp-ws-')
+    const { parent } = await threeTurns(h, cwd)
+
+    const forked = await h.acp.request('session/fork', { sessionId: parent as never, cwd, mcpServers: [] })
+    const joined = (await askChild(h, String(forked.sessionId))).join('\n')
+    expect(joined).toContain('第一轮回答')
+    expect(joined).toContain('第三轮回答')
+    h.disposeBridge()
+  }, 30_000)
+
+  it('父会话不受影响 —— 从中间分叉之后它仍是完整的三轮', async () => {
+    const h = await createHarness()
+    const cwd = realTempDir('dsacp-ws-')
+    const { parent, seen } = await threeTurns(h, cwd)
+    const messageId = seen.find((u) => u['sessionUpdate'] === 'agent_message_chunk')?.['messageId']
+
+    await h.acp.request('session/fork', {
+      sessionId: parent as never,
+      cwd,
+      mcpServers: [],
+      _meta: forkMeta({ messageId }),
+    })
+    await h.acp.request('session/prompt', {
+      sessionId: parent as never,
+      prompt: [{ type: 'text', text: '第四问' }],
+    })
+    // 截的是**子**会话的种子。父会话被一起截掉才是这个改动最贵的失败方式：用户
+    // 分了一支，回头发现原来那条少了两轮。
+    const joined = lastHistory(h).join('\n')
+    expect(joined).toContain('第二轮回答')
+    expect(joined).toContain('第三轮回答')
+    h.disposeBridge()
+  }, 30_000)
+
+  it('指一条不存在的消息报 -32602，且不牵连父会话', async () => {
+    const h = await createHarness()
+    const cwd = realTempDir('dsacp-ws-')
+    const parent = await chat(h, cwd, '一')
+
+    let failure: { code?: number; message?: string } | undefined
+    try {
+      await h.acp.request('session/fork', {
+        sessionId: parent as never,
+        cwd,
+        mcpServers: [],
+        _meta: forkMeta({ messageId: '从来没有过的消息' }),
+      })
+    } catch (error: unknown) {
+      failure = error as never
+    }
+    expect(failure, '这次 fork 本该失败').toBeDefined()
+    // **不是** `-32002`。那个码的意思是「这条会话没了」，客户端收到就把它从列表里
+    // 摘掉——而父会话好端端开着，错的只是这次指的消息，改一改重发有意义。
+    expect(failure?.code).toBe(-32602)
+    expect(failure?.message).toMatch(/was not found/)
+    expect(h.hasAgent(parent), 'fork 失败不该动到父会话').toBe(true)
+    h.disposeBridge()
+  }, 30_000)
+
+  it('_meta 块字段坏了就地报 -32602，不会先建出半个子会话', async () => {
+    const h = await createHarness()
+    const cwd = realTempDir('dsacp-ws-')
+    const parent = await chat(h, cwd, '一')
+    await expect(
+      h.acp.request('session/fork', {
+        sessionId: parent as never,
+        cwd,
+        mcpServers: [],
+        _meta: forkMeta({ messageId: '' }),
+      }),
+    ).rejects.toThrow(/messageId/)
+    h.disposeBridge()
+  }, 30_000)
+
+  it('版本号不认识时当作没给，退回尾部 fork 而不是报错', async () => {
+    // `_meta` 按规范就是实现方可以互相不认识的地方。为一个读不懂的扩展块拒绝整次
+    // fork，等于让装了新客户端的用户连普通分叉都做不了。
+    const h = await createHarness()
+    const cwd = realTempDir('dsacp-ws-')
+    const { parent } = await threeTurns(h, cwd)
+
+    const forked = await h.acp.request('session/fork', {
+      sessionId: parent as never,
+      cwd,
+      mcpServers: [],
+      _meta: { jetbrains: { air: { fork: { version: 99, messageId: '看不懂' } } } },
+    })
+    const joined = (await askChild(h, String(forked.sessionId))).join('\n')
+    expect(joined).toContain('第三轮回答')
+    h.disposeBridge()
+  }, 30_000)
 })
 
 describe('TC-FORK-05 拒绝路径', () => {

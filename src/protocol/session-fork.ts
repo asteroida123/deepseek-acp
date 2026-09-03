@@ -9,6 +9,10 @@
  * 因此这里**不复用** `restoreSession`：那个函数从头到尾都建立在「会话 id 是
  * 客户端给的、日志已经存在」之上，而 fork 的子会话 id 是本端现铸的、日志还不
  * 存在。共用只会让两条语义相反的路径互相牵制。
+ *
+ * 默认继承到父会话的**最后一个完整回合**。客户端要从中间某条回答分叉时，把分叉
+ * 点放在请求的 `_meta.jetbrains.air.fork` 里——形状与解析规则见
+ * `src/session/fork-point.ts`。
  * @module
  */
 
@@ -20,6 +24,7 @@ import type { Bridge } from '../bridge.js'
 import { invalidParams, internalError, resourceNotFound } from '../codec/errors.js'
 import { modeStateFor } from '../config/modes.js'
 import { ToolPresenter } from '../presentation/presenter.js'
+import { ForkPointUnresolved, readForkPoint } from '../session/fork-point.js'
 import { sameWorkspace } from '../session/workspace-path.js'
 import { mountSpecs } from './mcp-params.js'
 import { commandsUpdate } from './session-commands.js'
@@ -42,6 +47,9 @@ export async function handleForkSession(
   if (params.additionalDirectories !== undefined && params.additionalDirectories.length > 0) {
     throw invalidParams('additionalDirectories is not supported')
   }
+  // 在建任何东西之前读：这一步只会因为「块的字段坏了」失败，那时应该原地抛，
+  // 而不是先造出半个子会话再回滚。缺席就是 undefined，走原来的尾部 fork。
+  const forkPoint = readForkPoint(params._meta)
 
   const parentSessionId = params.sessionId as SessionId
   const parent = bridge.table.get(parentSessionId)
@@ -74,6 +82,7 @@ export async function handleForkSession(
       ...(bridge.config.provider !== undefined ? { provider: bridge.config.provider } : {}),
       ...(bridge.config.model !== undefined ? { model: bridge.config.model } : {}),
       mcpServers: mountSpecs(params.mcpServers ?? [], seq),
+      ...(forkPoint === undefined ? {} : { forkPoint }),
       // 读改道绑的是**子**会话 id：编辑器发来的 `fs/read_text_file` 带的是它正在
       // 交互的那条会话，而那条从现在起是子会话。
       ...(() => {
@@ -81,7 +90,13 @@ export async function handleForkSession(
         return readDelegate === undefined ? {} : { readDelegate }
       })(),
     })
-    .catch(async (error: unknown) => await rethrowMissingSession(bridge, parentSessionId, error))
+    .catch(async (error: unknown) => {
+      // 分诊要在 `rethrowMissingSession` **之前**：那个函数把裸 `Error` 当成
+      // 「父会话不在了」改判成 `-32002`，而客户端收到 `-32002` 的反应是把那条
+      // 会话从列表里摘掉——父会话明明好端端开着，错的只是这次指的消息。
+      if (error instanceof ForkPointUnresolved) throw invalidParams(error.message)
+      return await rethrowMissingSession(bridge, parentSessionId, error)
+    })
 
   const settled = async (error: Error): Promise<never> => {
     await handle.dispose()
